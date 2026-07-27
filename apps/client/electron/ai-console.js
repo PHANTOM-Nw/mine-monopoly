@@ -598,9 +598,12 @@ async function applyGlobalConfig() {
 		timeoutMs: 30000,
 	};
 	if (config.mode === "remote" && !config.defaultRemoteProfileId) {
-		if (!config.remote.baseUrl || !config.remote.apiKey || !config.remote.model) {
-			setStatus("默认远程模式下，默认远端配置需要填写 Base URL、API Key 和模型名", "err");
-			return;
+		const hasProfiles = (config.remoteProfiles && config.remoteProfiles.length > 0);
+		if (!hasProfiles && (!config.remote.baseUrl || !config.remote.apiKey || !config.remote.model)) {
+			const confirmed = confirm(
+				"当前远端配置为空且没有 LLM 档案，确定要清空所有远程 LLM 配置吗？\nAI 玩家将无法使用智能决策，只能执行简单的拒绝操作。"
+			);
+			if (!confirmed) return;
 		}
 	}
 	setStatus("正在应用默认 AI 配置...");

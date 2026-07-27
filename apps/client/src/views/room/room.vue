@@ -6,11 +6,10 @@
 	import { FPMessageBox, UserCancelledError } from "@src/components/utils/fp-message-box";
 	import ItemSelector from "@src/components/utils/item-selector/item-selector.vue";
 	import router from "@src/router";
-	import { useLoading, useRoomInfo } from "@src/store";
-	import { useUserInfo } from "@src/store";
+	import { useLoading, useRoomInfo, useSettig, useUserInfo } from "@src/store";
 	import { getGameMapById, getGameMapList } from "@src/utils/api/map";
 	import { MonopolyClient, useMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
-	import { computed, onBeforeMount, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
+	import { computed, h, onBeforeMount, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
 	import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 	import { copyToClipboard, getDisplayValueByFormSchema } from "@src/utils";
 	import { setRoomPrivate } from "@src/utils/api/room-router";
@@ -192,8 +191,46 @@ import { vStagger } from "@src/directives";
 		}
 	}
 
-	function handleAddAIPlayer() {
+	function isAnyLLMConfigured(): boolean {
+		const config = useSettig().aiDecisionConfig;
+		if (config.remote?.baseUrl && config.remote?.apiKey && config.remote?.model) {
+			return true;
+		}
+		if (config.remoteProfiles?.some((p) => p.baseUrl && p.apiKey && p.model)) {
+			return true;
+		}
+		return false;
+	}
+
+	async function handleAddAIPlayer() {
 		if (!socketClient) return;
+
+		if (!isAnyLLMConfigured()) {
+			try {
+				await FPMessageBox({
+					title: "提示",
+					content: h("div", { style: "line-height: 1.6;" }, [
+						"检测到未配置远程LLM（大语言模型），AI玩家将无法进行智能决策，只能执行简单的拒绝操作。",
+						h("br"),
+						"如需完整体验，请前往「AI设置」配置LLM。",
+						h("br"),
+						h(
+							"a",
+							{
+								href: "https://www.bilibili.com/video/BV1QhKr69EZ2",
+								target: "_blank",
+								style: "color: var(--fp-color-secondary); text-decoration: underline;",
+							},
+							"前往B站查看教程",
+						),
+					]),
+					confirmText: "知道了",
+				});
+			} catch {
+				// 用户关闭弹窗也继续添加
+			}
+		}
+
 		const result = socketClient.addAIPlayer();
 		if (!result.success) {
 			FPMessage({ type: "error", message: result.error || "添加 AI 玩家失败" });

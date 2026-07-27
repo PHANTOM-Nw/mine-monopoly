@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 import type { AIDecisionConfig, AIRemoteLLMProfile, AIRemoteLLMProviderKind } from "@mine-monopoly/types";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import FpMessage from "@mine-monopoly/ui/fp-message";
+import { FPMessageBox } from "@src/components/utils/fp-message-box";
 import FpDialog from "@src/components/utils/fp-dialog/fp-dialog.vue";
 import { normalizeAIDecisionConfig } from "@src/core/ai/ai-decision-config";
 import {
@@ -234,13 +235,25 @@ const validateRemoteProfiles = () => {
 	return "";
 };
 
-const applySettings = () => {
-	if (!tempAIBaseUrl.value.trim() || !tempAIModel.value.trim() || !tempAIApiKey.value.trim()) {
-		FpMessage({
-			type: "error",
-			message: "当前远程配置需要填写 Base URL、API Key 和模型名",
-		});
-		return;
+const applySettings = async () => {
+	const isCurrentRemoteEmpty =
+		!tempAIBaseUrl.value.trim() || !tempAIModel.value.trim() || !tempAIApiKey.value.trim();
+
+	if (isCurrentRemoteEmpty) {
+		const hasProfiles = tempRemoteProfiles.value.length > 0;
+		if (!hasProfiles) {
+			try {
+				await FPMessageBox({
+					title: "确认清空",
+					content:
+						"当前远端配置为空且没有 LLM 档案，确定要清空所有远程 LLM 配置吗？\nAI 玩家将无法使用智能决策，只能执行简单的拒绝操作。",
+					confirmText: "确认清空",
+					cancelText: "取消",
+				});
+			} catch {
+				return;
+			}
+		}
 	}
 
 	const profileValidationError = validateRemoteProfiles();
