@@ -1,5 +1,12 @@
 # @mine-monopoly/client
 
+## 1.2.4
+
+### Patch Changes
+
+- fedc52d: - 新增 AI 玩家配置检查，未配置时友好提示，避免误操作
+  - 修复部分旧设备上游戏无法正常运行的问题
+
 ## 1.2.3
 
 ### Patch Changes
