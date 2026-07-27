@@ -13,4 +13,11 @@ export const AppDataSource = new DataSource({
 	database: "monopoly",
 	synchronize: true,
 	entities: [User, GameMap, GameRecord],
+	extra: {
+		connectionLimit: env<number>("MYSQL_POOL_SIZE", 20),
+		acquireTimeout: env<number>("MYSQL_ACQUIRE_TIMEOUT", 30000),
+		connectTimeout: 10000,
+		enableKeepAlive: true,
+		keepAliveInitialDelay: 30000,
+	},
 });

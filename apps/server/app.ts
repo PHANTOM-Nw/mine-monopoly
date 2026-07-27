@@ -29,6 +29,16 @@ async function bootstrap() {
 		app.set("trust proxy", true);
 		app.use(cors());
 
+		// 请求级超时：防止数据库/COS 挂起导致请求永久无响应
+		app.use((req, res, next) => {
+			req.setTimeout(120_000, () => {
+				if (!res.headersSent) {
+					res.status(504).json({ status: 504, msg: "请求超时" });
+				}
+			});
+			next();
+		});
+
 		app.use("/static", express.static("public"));
 
 		app.use(roleValidation); //身份验证
@@ -43,7 +53,9 @@ async function bootstrap() {
 					.set({ online: false })
 					.where("online = true AND lastActiveTime < :twoMinAgo", { twoMinAgo })
 					.execute();
-			} catch {}
+			} catch (e: any) {
+				serverLog(`定时清理在线用户失败: ${e?.message || e}`, "warn");
+			}
 		}, 2 * 60 * 1000);
 
 		app.use(bodyParser.json());
