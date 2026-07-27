@@ -1777,7 +1777,7 @@ export class GameProcess implements IGameProcess {
 
 	private async initProperties() {
 		// 步骤1: 为所有地皮设置 commandBus
-		this.properties.values().forEach((property) => {
+		this.properties.forEach((property) => {
 			property.commandBus.setHandler("property.arrived", async (payload) => {
 				const { arrivedPlayer, owner, toll } = payload;
 				if (owner) {
@@ -1860,7 +1860,7 @@ export class GameProcess implements IGameProcess {
 		}
 
 		// 步骤3: 执行每个地皮的 customInitFn
-		this.properties.values().forEach((property) => {
+		this.properties.forEach((property) => {
 			const customInitFn = property.getCustomInitFunction();
 			customInitFn && customInitFn(property, this);
 		});
@@ -4214,7 +4214,7 @@ export class GameProcess implements IGameProcess {
 		// 停止心跳机制
 		this.stopHeartbeat();
 
-		this.players.keys().forEach((playerId) => {
+		this.players.forEach((_player, playerId) => {
 			operationListener.removeAll(playerId);
 		});
 		operationListener.clearAllTimers();
