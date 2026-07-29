@@ -1,5 +1,11 @@
 # @mine-monopoly/map-editor
 
+## 1.2.1
+
+### Patch Changes
+
+- - 修复地图编辑器预览与窗口缩放异常
+
 ## 1.2.0
 
 ### Minor Changes

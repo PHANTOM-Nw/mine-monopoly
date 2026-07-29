@@ -1,5 +1,11 @@
 # @mine-monopoly/client
 
+## 1.2.5
+
+### Patch Changes
+
+- - 修复玩家破产后的资产结算和场景清理问题
+
 ## 1.2.4
 
 ### Patch Changes
