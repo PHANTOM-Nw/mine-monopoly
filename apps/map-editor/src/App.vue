@@ -60,15 +60,17 @@ onUnmounted(() => {
 			},
 		}"
 	>
-		<TitleBar :bg-color="'#2e2e2e'">
-			<template #title>
-				<img style="width: 16px; height: 16px; margin-right: 6px" src="/logo.ico" alt="" />
-				<span style="font-size: 12px">MineMonopoly 地图编辑器 v{{ version }}</span>
-			</template>
-		</TitleBar>
-		<Header />
-		<div class="main-container">
-			<map-editor />
+		<div class="app-layout">
+			<TitleBar :bg-color="'#2e2e2e'">
+				<template #title>
+					<img style="width: 16px; height: 16px; margin-right: 6px" src="/logo.ico" alt="" />
+					<span style="font-size: 12px">MineMonopoly 地图编辑器 v{{ version }}</span>
+				</template>
+			</TitleBar>
+			<Header />
+			<div class="main-container">
+				<map-editor />
+			</div>
 		</div>
 	</a-config-provider>
 	<map-editor-alert />
@@ -76,9 +78,17 @@ onUnmounted(() => {
 </template>
 
 <style lang="scss" scoped>
+.app-layout {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	min-height: 0;
+}
+
 .main-container {
 	flex: 1;
 	display: flex;
+	min-height: 0;
 	position: relative;
 }
 </style>

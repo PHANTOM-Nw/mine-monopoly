@@ -282,14 +282,12 @@ const handleRoomInfoReply: ServerMessageHandler<SocketMsgType.RoomInfo> = (msg) 
 };
 
 const handleChangeMap: ServerMessageHandler<SocketMsgType.ChangeMap> = async (msg, client) => {
-	console.log("[ChangeMap] 14.client.handleChangeMap: 收到 ChangeMap, from=", msg.data?.from, "dataLen=", (msg.data?.data as string)?.length);
 	await handleChangeMapInternal(msg, client);
 };
 
 const handleChangeMapInternal: ServerMessageHandler<SocketMsgType.ChangeMap> = async (msg, client) => {
 	try {
 		const data = msg.data;
-		console.log("[ChangeMap] 16.handleChangeMapInternal: 开始加载地图, from=", data.from, "dataLen=", (data.data as string)?.length);
 		let gameMap, mapInfo;
 		switch (data.from) {
 			case "server": {
@@ -333,11 +331,12 @@ const handleChangeMapInternal: ServerMessageHandler<SocketMsgType.ChangeMap> = a
 		useRoomInfo().roleList = tempRoleList;
 		useRoomInfo().gameSettingForm = gameMap.gameSettingForm;
 		// 初始随机选择一个角色
-		if (roles.length > 0) {
-				useMonopolyClient().changeRole(roles[Math.floor(Math.random() * roles.length)].id);
-			}
+		if (roles.length > 0 && !useRoomInfo().amISpectator) {
+			useMonopolyClient().changeRole(roles[Math.floor(Math.random() * roles.length)].id);
+		}
 		// 如果自己是房主,提交默认游戏设置(房间类里不解析游戏数据, 只能靠房主来传)
 		if (useRoomInfo().amIRoomOwner) {
+			client.randomizeAIRoles();
 			const setting: GameSetting = {};
 			gameMap.gameSettingForm.forEach((formSchema) => {
 				setting[formSchema.key] = {
@@ -357,7 +356,6 @@ const handleChangeMapInternal: ServerMessageHandler<SocketMsgType.ChangeMap> = a
 			source: SocketMsgSource.Client,
 			data: { operateType: OperateType.MapResourceLoaded, data: undefined },
 		});
-		console.log("[ChangeMap] 17.handleChangeMapInternal: 地图加载成功, 关闭loading, mapName=", mapInfo.name);
 		useLoading().hideLoading();
 	} catch (e: any) {
 		logErrorWithOptions({
@@ -408,12 +406,10 @@ const handleGameInit: ServerMessageHandler<SocketMsgType.GameInit> = (msg) => {
 		const utilStore = useUtil();
 		utilStore.resetTurnState();
 		const me = gameData.players.find((p) => p.id === useUserInfo().userId);
-		if (me) {
-			utilStore.setBankrupted(me.isBankrupted);
-		}
+		utilStore.setBankrupted(me?.isBankrupted ?? false);
 
 		// 同步回合状态
-		const isMyTurn = gameData.currentPlayerIdInRound === useUserInfo().userId;
+		const isMyTurn = Boolean(me) && gameData.currentPlayerIdInRound === useUserInfo().userId;
 		utilStore.changeTurn(isMyTurn);
 	}
 	const loadingStore = useLoading();
@@ -447,14 +443,12 @@ const handleGameData: ServerMessageHandler<SocketMsgType.GameData> = (msg) => {
 	if (gameData) {
 		gameDataStore.updateGameData(gameData);
 		const me = gameData.players.find((p) => p.id === useUserInfo().userId);
-		if (me) {
-			const utilStore = useUtil();
-			utilStore.setBankrupted(me.isBankrupted);
+		const utilStore = useUtil();
+		utilStore.setBankrupted(me?.isBankrupted ?? false);
 
-			// 同步回合状态
-			const isMyTurn = gameData.currentPlayerIdInRound === useUserInfo().userId;
-			utilStore.changeTurn(isMyTurn);
-		}
+		// 同步回合状态
+		const isMyTurn = Boolean(me) && gameData.currentPlayerIdInRound === useUserInfo().userId;
+		utilStore.changeTurn(isMyTurn);
 	}
 };
 
@@ -745,7 +739,6 @@ const handleMessageCardDialog: ServerMessageHandler<SocketMsgType.MessageCard> =
 
 const handleLoadingControl: ServerMessageHandler<SocketMsgType.LoadingControl> = (msg, client) => {
 	const { show, text } = msg.data;
-	console.log("[ChangeMap] LC.handleLoadingControl: show=", show, "text=", text);
 	if (show) {
 		useLoading().showLoading(text || "加载中...");
 		client.sendLoadingStarted();
@@ -901,7 +894,6 @@ const handleMapChunkEnd: ServerMessageHandler<SocketMsgType.MapChunkEnd> = async
 		}
 		const fullData = sortedChunks.join("");
 		const mapInfo: RoomMapInfo = { ...state.mapInfo, data: fullData };
-		console.log("[ChangeMap] 15.handleMapChunkEnd: 分块组装完成, totalChunks=", state.totalChunks, "fullDataLen=", fullData.length);
 		await handleChangeMapInternal({ type: SocketMsgType.ChangeMap, source: SocketMsgSource.Server, data: mapInfo } as SocketMessage<SocketMsgType.ChangeMap, SocketMsgSource.Server>, client);
 	} catch (e: any) {
 		logErrorWithOptions({

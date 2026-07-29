@@ -44,6 +44,7 @@ export class Player implements IPlayer {
 	public isBankrupted: boolean = false; //是否破产
 	public isOffline: boolean; //是否断线
 	public isAI: boolean = false; //是否为AI托管
+	private aiThinkingRequestCount: number = 0;
 	public stop: number = 0;
 	public infoDisplay: UISchema;
 
@@ -55,6 +56,7 @@ export class Player implements IPlayer {
 
 	private user: UserInRoomInfo;
 	private roleInitFunction: (player: IPlayer, gameProcess: IGameProcess) => void;
+	private bankruptcyHandler?: (player: Player) => Promise<void>;
 
 	constructor(
 		user: UserInRoomInfo,
@@ -174,13 +176,13 @@ export class Player implements IPlayer {
 			return payload;
 		});
 
-		this.commandBus.setHandler("player.money.lose", (payload) => {
+		this.commandBus.setHandler("player.money.lose", async (payload) => {
 			const { money } = payload;
 			const moneyToLose = money > 0 ? money : 0;
 			const success = this.money >= moneyToLose;
 			const actualCost = success ? moneyToLose : this.money;
 			this.money -= actualCost;
-			if (this.money <= 0) this.setBankrupted(true);
+			if (this.money <= 0) await this.markBankrupted();
 			return {
 				...payload,
 				success,
@@ -195,9 +197,13 @@ export class Player implements IPlayer {
 			return payload;
 		});
 
-		this.commandBus.setHandler("player.bankrupted.set", (payload) => {
+		this.commandBus.setHandler("player.bankrupted.set", async (payload) => {
 			const { bankrupted } = payload;
-			this.isBankrupted = bankrupted;
+			if (bankrupted) {
+				await this.markBankrupted();
+			} else {
+				this.isBankrupted = false;
+			}
 			return payload;
 		});
 
@@ -237,7 +243,11 @@ export class Player implements IPlayer {
 
 	public async setMoney(money: number) {
 		this.money = money;
-		if (this.money <= 0) this.setBankrupted(true);
+		if (this.money <= 0) await this.markBankrupted();
+	}
+
+	public setBankruptcyHandler(handler: (player: Player) => Promise<void>) {
+		this.bankruptcyHandler = handler;
 	}
 
 	public async setStop(stop: number) {
@@ -249,7 +259,19 @@ export class Player implements IPlayer {
 	}
 
 	public setBankrupted(isBankrupted: boolean) {
+		const becameBankrupted = isBankrupted && !this.isBankrupted;
 		this.isBankrupted = isBankrupted;
+		if (becameBankrupted) {
+			void this.bankruptcyHandler?.(this).catch((error) => {
+				console.error(`玩家 ${this.name} 破产清算失败:`, error);
+			});
+		}
+	}
+
+	private async markBankrupted() {
+		if (this.isBankrupted) return;
+		this.isBankrupted = true;
+		await this.bankruptcyHandler?.(this);
 	}
 
 	public getBuff(): Buff[] {
@@ -257,6 +279,22 @@ export class Player implements IPlayer {
 			...this.modifierManager.getBuffs(),
 			...this.buffManager.getBuffs(),
 		];
+	}
+
+	public isAIThinking(): boolean {
+		return this.aiThinkingRequestCount > 0;
+	}
+
+	public beginAIThinking(): boolean {
+		const wasThinking = this.isAIThinking();
+		this.aiThinkingRequestCount += 1;
+		return !wasThinking;
+	}
+
+	public endAIThinking(): boolean {
+		const wasThinking = this.isAIThinking();
+		this.aiThinkingRequestCount = Math.max(0, this.aiThinkingRequestCount - 1);
+		return wasThinking && !this.isAIThinking();
 	}
 
 	public getCardById(id: string) {
@@ -274,8 +312,9 @@ export class Player implements IPlayer {
 			"modifierManager", "buffManager", "commandBus", "roundPhases",
 			"id", "user", "dices", "money", "properties", "chanceCards",
 			"positionIndex", "isStop", "stop", "isBankrupted", "isOffline",
-			"isAI", "infoDisplay",
+			"isAI", "isThinking", "infoDisplay",
 			"name", "roleId",
+			"aiThinkingRequestCount",
 			"exportData",
 		]);
 
@@ -292,6 +331,7 @@ export class Player implements IPlayer {
 			isBankrupted: this.isBankrupted,
 			isOffline: this.isOffline,
 			isAI: this.isAI,
+			isThinking: this.isAIThinking(),
 			infoDisplay: this.infoDisplay,
 			...pickSerializableFields(this, excludeKeys),
 		};
@@ -354,7 +394,7 @@ export class Player implements IPlayer {
 		"modifierManager", "buffManager", "commandBus", "roundPhases",
 		"infoDisplay", "user", "roleInitFunction",
 		"properties", "chanceCards",
-		"dices", "stop",
+		"dices", "stop", "aiThinkingRequestCount",
 		"exportData",
 	]);
 
@@ -387,6 +427,8 @@ export class Player implements IPlayer {
 	]);
 
 	public restoreFromSnapshot(snapshot: PlayerSnapshot, gameProcess: any): void {
+		this.aiThinkingRequestCount = 0;
+
 		// 通用恢复：遍历快照中所有字段，跳过由专门逻辑处理的
 		for (const key of Object.keys(snapshot)) {
 			if (Player.RESTORE_SPECIAL_KEYS.has(key)) continue;

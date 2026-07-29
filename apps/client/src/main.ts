@@ -7,6 +7,8 @@ import "@src/assets/font/font.css";
 import contentFontUrl from "./assets/font/ContentFont.woff2?url";
 import contentFontAllUrl from "./assets/font/ContentFont-all.woff2?url";
 import { getPlatformType, isPC } from "./utils/platform";
+import { normalizeAIDecisionConfig } from "@src/core/ai/ai-decision-config";
+import { registerAIControlBridge } from "@src/core/ai/ai-control-bridge";
 import App from "./App.vue";
 import { initPlatform } from "./platform";
 
@@ -105,6 +107,8 @@ import {
 	faRotateLeft,
 	faBoxOpen,
 	faTrashCan,
+	faEye,
+	faEyeSlash,
 } from "@fortawesome/free-solid-svg-icons";
 import { useDeviceStatus, useSettig } from "@src/store";
 import { isFullScreen as _isFullScreen, isLandscape as _isLandscape, isMobileDevice } from "@src/utils";
@@ -180,23 +184,61 @@ library.add(
 	faPlay,
 	faRotateLeft,
 	faBoxOpen,
-	faTrashCan
+	faTrashCan,
+	faEye,
+	faEyeSlash
 );
-await initPlatform();
+async function bootstrap() {
+	await initPlatform();
 
-const pinia = createPinia();
-const app = createApp(App);
+	const pinia = createPinia();
+	const app = createApp(App);
 
-app.use(pinia).use(router).component("font-awesome-icon", FontAwesomeIcon).directive("sound", soundDirective).mount("#app");
+	app.use(pinia).use(router).component("font-awesome-icon", FontAwesomeIcon).directive("sound", soundDirective).mount("#app");
 
-// 标记应用已成功启动，全局错误处理据此切换显示策略
-window.__APP_STARTED__ = true;
+	// 标记应用已成功启动，全局错误处理据此切换显示策略
+	window.__APP_STARTED__ = true;
 
-// 初始化 console 拦截器（在开发环境中也启用）
-interceptConsole();
+	// 初始化 console 拦截器（在开发环境中也启用）
+	interceptConsole();
 
-initDeviceStatusListener();
-initSettingStore();
+	initDeviceStatusListener();
+	await initSettingStore();
+	registerAIControlBridge();
+
+	// --- 捕获 Vue 组件内部错误 ---
+	app.config.errorHandler = (err, instance, info) => {
+		console.error("[Vue Error]:", err);
+
+		// 收集组件信息
+		const componentName = instance?.$options?.name || instance?.$options?.__name || "Unknown";
+		const props = instance?.$props;
+		const route = window.location.pathname;
+		const userAgent = navigator.userAgent;
+		const screenInfo = `${screen.width}x${screen.height}`;
+
+		FPMessage({ type: "error", message: `${formatErrorType("Vue 错误")}\n${getLogLocationHint()}` });
+
+		logErrorToPlatform({
+			type: "Vue",
+			message: err instanceof Error ? err.message : String(err),
+			stack: err instanceof Error ? err.stack : undefined,
+			info,
+			timestamp: new Date().toISOString(),
+			additionalData: {
+				componentName,
+				props: props ? JSON.stringify(props, null, 2) : undefined,
+				route,
+				userAgent: userAgent.substring(0, 200),
+				screenInfo,
+				memoryUsage: performance?.memory ? {
+					usedJSHeapSize: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) + " MB",
+					totalJSHeapSize: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024) + " MB"
+				} : undefined
+			}
+		});
+	};
+}
 
 async function initSettingStore() {
 	const settingStore = useSettig();
@@ -204,6 +246,7 @@ async function initSettingStore() {
 	if (savedState) {
 		settingStore.$patch(JSON.parse(savedState));
 	}
+	settingStore.aiDecisionConfig = normalizeAIDecisionConfig(settingStore.aiDecisionConfig);
 
 	// 同步设置到音频管理器
 	const { useAudioManager } = await import("@src/utils/audio");
@@ -425,39 +468,6 @@ function interceptConsole() {
 	};
 }
 
-// --- 捕获 Vue 组件内部错误 ---
-app.config.errorHandler = (err, instance, info) => {
-	console.error("[Vue Error]:", err);
-
-	// 收集组件信息
-	const componentName = instance?.$options?.name || instance?.$options?.__name || "Unknown";
-	const props = instance?.$props;
-	const route = window.location.pathname;
-	const userAgent = navigator.userAgent;
-	const screenInfo = `${screen.width}x${screen.height}`;
-
-	FPMessage({ type: "error", message: `${formatErrorType("Vue 错误")}\n${getLogLocationHint()}` });
-
-	logErrorToPlatform({
-		type: "Vue",
-		message: err instanceof Error ? err.message : String(err),
-		stack: err instanceof Error ? err.stack : undefined,
-		info,
-		timestamp: new Date().toISOString(),
-		additionalData: {
-			componentName,
-			props: props ? JSON.stringify(props, null, 2) : undefined,
-			route,
-			userAgent: userAgent.substring(0, 200),
-			screenInfo,
-			memoryUsage: performance?.memory ? {
-				usedJSHeapSize: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) + " MB",
-				totalJSHeapSize: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024) + " MB"
-			} : undefined
-		}
-	});
-};
-
 // --- 捕获未处理的 Promise 拒绝 (Async/Await, Axios 等) ---
 window.addEventListener("unhandledrejection", (event) => {
 	console.error("[Unhandled Promise]:", event.reason);
@@ -532,3 +542,5 @@ window.addEventListener("error", (event) => {
 
 	event.preventDefault();
 });
+
+void bootstrap();

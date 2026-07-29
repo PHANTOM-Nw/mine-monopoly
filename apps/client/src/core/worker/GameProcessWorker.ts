@@ -10,6 +10,7 @@ import {
 } from "@src/interfaces/worker";
 import { WorkerCommType } from "@src/enums/worker";
 import {
+	AIDecisionConfig,
 	ChanceCardInfo,
 	TargetSelectType,
 	ConfirmDialogOption,
@@ -52,6 +53,12 @@ import {
 	ButtonRegisterMessage,
 	ButtonStateChangedMessage,
 	ButtonRemoveMessage,
+	AIDecisionContextSnapshot,
+	AIDecisionOption,
+	AIDecisionPrompt,
+	AIDecisionRequest,
+	AIDecisionSelection,
+	AIDecisionProvider,
 } from "@mine-monopoly/types";
 import { allRuntimeEnums } from "./runtime-enums";
 import { ButtonController } from "./ButtonController";
@@ -65,7 +72,7 @@ import { GameRuntimeStack } from "@src/core/worker/class/GameRuntimeStack";
 import GameProcessTypes from "./editor-lib.d.ts?raw";
 import { generatePropertySchema } from "@src/utils/html";
 import mitt from "mitt";
-import { aiManager } from "./ai/AIStrategy";
+import { aiManager } from "./ai";
 import type { Emitter } from "mitt";
 import { SaveSnapshot, PlayerSnapshot, PropertySnapshot } from "@src/core/save/types";
 import { applyWorkerSandbox } from "./security";
@@ -76,6 +83,91 @@ applyWorkerSandbox();
 
 const operationListener = new OperateListener();
 let gameProcess: GameProcess | null = null;
+const AI_LOG_PREFIX = "[AI Flow]";
+let aiDecisionRequestSeq = 0;
+const pendingAIDecisionRequests = new Map<
+	string,
+	{
+		resolve: (selection: AIDecisionSelection) => void;
+		reject: (error: Error) => void;
+		timeoutId: ReturnType<typeof setTimeout>;
+	}
+>();
+
+type AITurnActionState = {
+	attemptedDynamicButtons: Record<string, string>;
+};
+
+type AIPreRollOperationTask = {
+	sessionId: number;
+	task: Promise<void>;
+};
+
+type AIChainedDecisionStep = {
+	title: string;
+	scene?: AIDecisionRequest["scene"];
+	chosen?: string;
+	summary?: string;
+};
+
+type AIChainedDecisionState = {
+	chainId: string;
+	eventName: string;
+	round: number;
+	currentRoundPlayerId?: string;
+	steps: AIChainedDecisionStep[];
+	lastUpdatedAt: number;
+};
+
+class HostBridgeDecisionProvider implements AIDecisionProvider {
+	constructor(private readonly config: AIDecisionConfig) {}
+
+	async decide(request: AIDecisionRequest): Promise<AIDecisionSelection> {
+		const timeoutMs = this.config.remote.timeoutMs ?? 30000;
+		const requestId = `ai-request-${++aiDecisionRequestSeq}`;
+		try {
+			return await new Promise<AIDecisionSelection>((resolve, reject) => {
+				const timeoutId = setTimeout(() => {
+					pendingAIDecisionRequests.delete(requestId);
+					reject(new Error("AI decision bridge timeout"));
+				}, timeoutMs);
+
+				pendingAIDecisionRequests.set(requestId, { resolve, reject, timeoutId });
+				self.postMessage(<WorkerCommMsg>{
+					type: WorkerCommType.RequestAIDecision,
+					data: {
+						requestId,
+						request,
+					},
+				});
+			});
+		} catch (error) {
+			console.warn("[AI Remote] bridge request failed", error);
+			return {};
+		}
+	}
+}
+
+function applyAIDecisionConfig(config: AIDecisionConfig): void {
+	aiManager.setContextMemoryLimit(config.contextMemoryLimit ?? 6);
+	aiManager.setProvider(new HostBridgeDecisionProvider(config));
+}
+
+function resolveAIDecisionResponse(data: {
+	requestId: string;
+	selection?: AIDecisionSelection;
+	error?: string;
+}): void {
+	const pending = pendingAIDecisionRequests.get(data.requestId);
+	if (!pending) return;
+	clearTimeout(pending.timeoutId);
+	pendingAIDecisionRequests.delete(data.requestId);
+	if (data.error) {
+		pending.reject(new Error(data.error));
+		return;
+	}
+	pending.resolve(data.selection || {});
+}
 
 // ========== Web Worker 错误捕获 ==========
 
@@ -202,7 +294,7 @@ async function handleSetMoney(
 
 	switch (operation) {
 		case "set":
-			player.setMoney(amount);
+			await player.setMoney(amount);
 			break;
 		case "add":
 			await player.gain(amount);
@@ -288,7 +380,8 @@ async function handleMessage(data: WorkerCommMsg) {
 		case WorkerCommType.LoadGameInfo:
 			{
 				try {
-					const { mapInfo, setting, userList, roomOwnerId, saveData } = data.data;
+					const { mapInfo, setting, userList, roomOwnerId, aiConfig, saveData } = data.data;
+					applyAIDecisionConfig(aiConfig);
 					gameProcess = new GameProcess(mapInfo, setting, userList, roomOwnerId);
 					if (saveData) {
 						gameProcess.setPendingSaveData(saveData);
@@ -306,6 +399,15 @@ async function handleMessage(data: WorkerCommMsg) {
 					throw e;
 				}
 			}
+			break;
+		case WorkerCommType.UpdateAIDecisionConfig:
+			applyAIDecisionConfig(data.data);
+			break;
+		case WorkerCommType.ClearAIStrategyMemory:
+			aiManager.clearStrategyState(data.data?.playerId);
+			break;
+		case WorkerCommType.AIDecisionResponse:
+			resolveAIDecisionResponse(data.data);
 			break;
 		case WorkerCommType.EmitOperation:
 			{
@@ -475,6 +577,24 @@ export class GameProcess implements IGameProcess {
 	private playerButtons: Map<string, Map<string, ButtonConfig>> = new Map();
 	/** 跟踪已注册监听器的玩家ID */
 	private playerButtonListeners: Set<string> = new Set();
+	/** AI 动态按钮决策定时器 */
+	private aiDynamicButtonTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+	/** AI 动态按钮是否正在决策 */
+	private aiDynamicButtonInFlight: Set<string> = new Set();
+	/** AI 动态按钮调度抑制（防止同一按钮回调结束后立即再次触发） */
+	private aiDynamicButtonSchedulingSuppressed: Set<string> = new Set();
+	/** AI 当前回合的主动动作状态 */
+	private aiTurnActionState: Map<string, AITurnActionState> = new Map();
+	/** AI 预掷骰操作 session 号 */
+	private aiPreRollOperationSessionSeq: number = 0;
+	/** AI 预掷骰操作当前 session */
+	private aiPreRollOperationSessions: Map<string, number> = new Map();
+	/** AI 预掷骰操作 broker 任务 */
+	private aiPreRollOperationTasks: Map<string, AIPreRollOperationTask> = new Map();
+	/** AI 当前是否处于预掷骰操作 broker 中 */
+	private aiPreRollOperationPlayers: Set<string> = new Set();
+	/** AI 连续弹窗决策链 */
+	private aiDecisionChains: Map<string, AIChainedDecisionState> = new Map();
 	/** 按钮ID计数器 */
 	private buttonIdCounter: number = 0;
 	/** 缓存的 UI 替换规则（用于运行时动态创建的 modifier） */
@@ -603,7 +723,11 @@ export class GameProcess implements IGameProcess {
 	 * @param callback 点击回调函数
 	 * @returns ButtonController 按钮控制实例
 	 */
-	public registerPlayerButton(playerId: string, text: string, callback: () => Promise<void> | void): ButtonController {
+	public registerPlayerButton(
+		playerId: string,
+		text: string,
+		callback: () => Promise<void> | void,
+	): ButtonController {
 		// 验证玩家ID
 		if (!this.players.has(playerId)) {
 			throw new Error(`玩家不存在: ${playerId}`);
@@ -665,6 +789,8 @@ export class GameProcess implements IGameProcess {
 			data: registerMessage,
 		});
 
+		this.scheduleAIDynamicButtonDecision(playerId);
+
 		return controller;
 	}
 
@@ -693,6 +819,10 @@ export class GameProcess implements IGameProcess {
 			source: SocketMsgSource.Server,
 			data: stateMessage,
 		});
+
+		if (enabled && config.visible && !this.aiDynamicButtonSchedulingSuppressed.has(playerId)) {
+			this.scheduleAIDynamicButtonDecision(playerId);
+		}
 	}
 
 	/**
@@ -720,6 +850,10 @@ export class GameProcess implements IGameProcess {
 			source: SocketMsgSource.Server,
 			data: stateMessage,
 		});
+
+		if (visible && config.enabled) {
+			this.scheduleAIDynamicButtonDecision(playerId);
+		}
 	}
 
 	/**
@@ -747,6 +881,10 @@ export class GameProcess implements IGameProcess {
 			source: SocketMsgSource.Server,
 			data: stateMessage,
 		});
+
+		if (config.visible && config.enabled) {
+			this.scheduleAIDynamicButtonDecision(playerId);
+		}
 	}
 
 	/**
@@ -773,6 +911,8 @@ export class GameProcess implements IGameProcess {
 			source: SocketMsgSource.Server,
 			data: removeMessage,
 		});
+
+		this.scheduleAIDynamicButtonDecision(playerId);
 	}
 
 	// ==================== 动态地图事件管理 ====================
@@ -881,6 +1021,380 @@ export class GameProcess implements IGameProcess {
 		return Array.from(playerButtons.values());
 	}
 
+	private scheduleAIDynamicButtonDecision(playerId: string): void {
+		const player = this.players.get(playerId);
+		if (!player?.isAI || this.currentRoundPlayer?.id !== playerId || this.aiPreRollOperationPlayers.has(playerId)) {
+			return;
+		}
+
+		const previousTimer = this.aiDynamicButtonTimers.get(playerId);
+		if (previousTimer) {
+			clearTimeout(previousTimer);
+		}
+
+		const timer = setTimeout(() => {
+			this.aiDynamicButtonTimers.delete(playerId);
+			void this.tryAIDynamicButtonDecision(playerId);
+		}, 180);
+		this.aiDynamicButtonTimers.set(playerId, timer);
+	}
+
+	private async tryAIDynamicButtonDecision(playerId: string): Promise<void> {
+		const player = this.players.get(playerId);
+		if (
+			!player?.isAI ||
+			this.currentRoundPlayer?.id !== playerId ||
+			this.aiDynamicButtonInFlight.has(playerId) ||
+			this.aiPreRollOperationPlayers.has(playerId)
+		) {
+			return;
+		}
+
+		const request = this.buildDynamicButtonDecisionRequest(player, this.buildAIDecisionContext(player));
+		if (!request) {
+			return;
+		}
+		this.ensureAIDecisionMetadata(request, playerId, `dynamic-button:${request.title}`);
+
+		this.aiDynamicButtonInFlight.add(playerId);
+		try {
+			console.log(`${AI_LOG_PREFIX} dynamic-button request`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				title: request.title,
+				scene: request.scene,
+				options: request.options.map((option) => ({
+					id: option.id,
+					label: option.label,
+					actionType: option.actionType,
+				})),
+			});
+			const selection = await this.runAIDecision(player, request);
+			console.log(`${AI_LOG_PREFIX} dynamic-button selection`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				selection,
+			});
+			const selectedOptionId = selection.optionId;
+			const selectedOption = request.options.find((option) => option.id === selectedOptionId);
+			const buttonId = String(selectedOption?.payload?.id || selectedOptionId || "");
+			if (!selectedOption || !buttonId) {
+				return;
+			}
+
+			this.markAITurnDynamicButtonAttempt(playerId, buttonId, selectedOption.label);
+			aiManager.feedback({
+				playerId,
+				request,
+				selection,
+				outcome: "dynamic-button",
+			});
+			console.log(`${AI_LOG_PREFIX} execute dynamic button`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				buttonId,
+				label: selectedOption.label,
+			});
+			await this.handleDynamicButtonClick(playerId, buttonId);
+		} finally {
+			this.aiDynamicButtonInFlight.delete(playerId);
+		}
+	}
+
+	private ensureAIPreRollOperationSession(playerId: string): number {
+		const currentSessionId = this.aiPreRollOperationSessions.get(playerId);
+		if (currentSessionId) {
+			return currentSessionId;
+		}
+
+		const sessionId = ++this.aiPreRollOperationSessionSeq;
+		this.aiPreRollOperationSessions.set(playerId, sessionId);
+		return sessionId;
+	}
+
+	private isAIPreRollOperationSessionActive(playerId: string, sessionId: number): boolean {
+		return this.currentRoundPlayer?.id === playerId && this.aiPreRollOperationSessions.get(playerId) === sessionId;
+	}
+
+	private invalidateAIPreRollOperationSession(playerId: string): void {
+		this.aiPreRollOperationSessions.delete(playerId);
+		this.aiPreRollOperationPlayers.delete(playerId);
+		this.aiPreRollOperationTasks.delete(playerId);
+	}
+
+	private syncAIPreRollOperationSession(playerId: string): void {
+		const hasRollDiceListener = operationListener.hasListener(playerId, OperateType.RollDice);
+		const hasUseChanceCardListener = operationListener.hasListener(playerId, OperateType.UseChanceCard);
+		if (!hasRollDiceListener && !hasUseChanceCardListener) {
+			this.invalidateAIPreRollOperationSession(playerId);
+		}
+	}
+
+	private closeAIPreRollOperationSessionAndEmit<T extends OperateType>(
+		playerId: string,
+		sessionId: number,
+		operationType: T,
+		data: PlayerOperationResult[T],
+	): void {
+		if (!this.isAIPreRollOperationSessionActive(playerId, sessionId)) {
+			return;
+		}
+		this.invalidateAIPreRollOperationSession(playerId);
+		this.emitPlayerOperation(playerId, operationType, data);
+	}
+
+	private ensureAIPreRollOperationBroker(player: Player): void {
+		if (!player.isAI || this.currentRoundPlayer?.id !== player.id) {
+			return;
+		}
+		const sessionId = this.ensureAIPreRollOperationSession(player.id);
+		if (this.aiPreRollOperationTasks.has(player.id)) {
+			return;
+		}
+
+		const pendingTimer = this.aiDynamicButtonTimers.get(player.id);
+		if (pendingTimer) {
+			clearTimeout(pendingTimer);
+			this.aiDynamicButtonTimers.delete(player.id);
+		}
+
+		this.aiPreRollOperationPlayers.add(player.id);
+		const task = this.runAIPreRollOperationBroker(player.id, sessionId)
+			.catch((error) => {
+				console.error(`${AI_LOG_PREFIX} pre-roll broker failed`, {
+					playerId: player.id,
+					sessionId,
+					error,
+				});
+			})
+			.finally(() => {
+				const currentTask = this.aiPreRollOperationTasks.get(player.id);
+				if (currentTask?.sessionId === sessionId) {
+					this.aiPreRollOperationPlayers.delete(player.id);
+					this.aiPreRollOperationTasks.delete(player.id);
+				}
+			});
+		this.aiPreRollOperationTasks.set(player.id, {
+			sessionId,
+			task,
+		});
+	}
+
+	private async runAIPreRollOperationBroker(playerId: string, sessionId: number): Promise<void> {
+		const blockedChanceCardIds = new Set<string>();
+		// Let the current synchronous phase script finish registering all pre-roll listeners
+		// before we snapshot available actions for the AI.
+		await Promise.resolve();
+
+		while (this.isAIPreRollOperationSessionActive(playerId, sessionId)) {
+			const player = this.players.get(playerId);
+			if (!player?.isAI) {
+				return;
+			}
+
+			const allowRollDice = operationListener.hasListener(playerId, OperateType.RollDice);
+			const allowUseChanceCard = operationListener.hasListener(playerId, OperateType.UseChanceCard);
+			if (!allowRollDice && !allowUseChanceCard) {
+				return;
+			}
+
+			const request = this.buildAIPreRollOperationRequest(player, {
+				allowRollDice,
+				allowUseChanceCard,
+				blockedChanceCardIds,
+			});
+			if (!request) {
+				if (allowRollDice) {
+					console.log(`${AI_LOG_PREFIX} pre-roll broker auto-roll`, {
+						playerId,
+						reason: "no_active_actions",
+					});
+					this.closeAIPreRollOperationSessionAndEmit(
+						playerId,
+						sessionId,
+						OperateType.RollDice,
+						undefined as PlayerOperationResult[OperateType.RollDice],
+					);
+				}
+				return;
+			}
+			this.ensureAIDecisionMetadata(request, playerId, `pre-roll:${request.title}`);
+
+			console.log(`${AI_LOG_PREFIX} pre-roll request`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				sessionId,
+				title: request.title,
+				scene: request.scene,
+				options: request.options.map((option) => ({
+					id: option.id,
+					label: option.label,
+					actionType: option.actionType,
+					actionKind: option.payload?.actionKind,
+				})),
+			});
+			const selection = await this.runAIDecision(player, request);
+			console.log(`${AI_LOG_PREFIX} pre-roll selection`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				sessionId,
+				selection,
+			});
+			if (!this.isAIPreRollOperationSessionActive(playerId, sessionId)) {
+				console.log(`${AI_LOG_PREFIX} stale pre-roll selection ignored`, {
+					playerId,
+					sessionId,
+				});
+				return;
+			}
+
+			const selectedOptionId = selection.optionId;
+			if (!selectedOptionId || selectedOptionId === "__finish_pre_roll__" || selectedOptionId === "__cancel__") {
+				aiManager.feedback({
+					playerId,
+					request,
+					selection,
+					outcome: "finish-pre-roll",
+				});
+				if (allowRollDice) {
+					this.closeAIPreRollOperationSessionAndEmit(
+						playerId,
+						sessionId,
+						OperateType.RollDice,
+						undefined as PlayerOperationResult[OperateType.RollDice],
+					);
+				}
+				return;
+			}
+
+			const selectedOption = request.options.find((option) => option.id === selectedOptionId);
+			if (!selectedOption) {
+				if (allowRollDice) {
+					this.closeAIPreRollOperationSessionAndEmit(
+						playerId,
+						sessionId,
+						OperateType.RollDice,
+						undefined as PlayerOperationResult[OperateType.RollDice],
+					);
+				}
+				return;
+			}
+
+			const actionKind = String(selectedOption.payload?.actionKind || "");
+			if (actionKind === "dynamic-button") {
+				const buttonId = String(selectedOption.payload?.id || "");
+				if (!buttonId) {
+					if (allowRollDice) {
+						this.closeAIPreRollOperationSessionAndEmit(
+							playerId,
+							sessionId,
+							OperateType.RollDice,
+							undefined as PlayerOperationResult[OperateType.RollDice],
+						);
+					}
+					return;
+				}
+
+				this.markAITurnDynamicButtonAttempt(playerId, buttonId, selectedOption.label);
+				aiManager.feedback({
+					playerId,
+					request,
+					selection,
+					outcome: "dynamic-button",
+				});
+				console.log(`${AI_LOG_PREFIX} pre-roll execute dynamic button`, {
+					decisionId: request.metadata?.decisionId,
+					playerId,
+					sessionId,
+					buttonId,
+					label: selectedOption.label,
+				});
+				await this.handleDynamicButtonClick(playerId, buttonId);
+				if (!this.isAIPreRollOperationSessionActive(playerId, sessionId)) {
+					return;
+				}
+				continue;
+			}
+
+			if (actionKind === "use-chance-card") {
+				const chanceCardId = String(selectedOption.payload?.id || "");
+				if (!allowUseChanceCard) {
+					if (allowRollDice) {
+						this.closeAIPreRollOperationSessionAndEmit(
+							playerId,
+							sessionId,
+							OperateType.RollDice,
+							undefined as PlayerOperationResult[OperateType.RollDice],
+						);
+					}
+					return;
+				}
+				if (!chanceCardId) {
+					if (allowRollDice) {
+						this.closeAIPreRollOperationSessionAndEmit(
+							playerId,
+							sessionId,
+							OperateType.RollDice,
+							undefined as PlayerOperationResult[OperateType.RollDice],
+						);
+					}
+					return;
+				}
+
+				const chanceCard = player.getCardById(chanceCardId);
+				if (!chanceCard) {
+					blockedChanceCardIds.add(chanceCardId);
+					continue;
+				}
+
+				const targetIdList = await this.buildAIChanceCardTargetIds(player, chanceCardId);
+				if (!this.isAIPreRollOperationSessionActive(playerId, sessionId)) {
+					return;
+				}
+				if (chanceCard.getType() !== TargetSelectType.ToSelf && targetIdList.length === 0) {
+					aiManager.feedback({
+						playerId,
+						request,
+						selection,
+						outcome: "chance-card-no-target",
+					});
+					blockedChanceCardIds.add(chanceCardId);
+					continue;
+				}
+
+				aiManager.feedback({
+					playerId,
+					request,
+					selection,
+					outcome: "chance-card",
+				});
+				console.log(`${AI_LOG_PREFIX} pre-roll emit chance card`, {
+					decisionId: request.metadata?.decisionId,
+					playerId,
+					sessionId,
+					chanceCardId,
+					label: selectedOption.label,
+					targetIdList,
+				});
+				this.closeAIPreRollOperationSessionAndEmit(playerId, sessionId, OperateType.UseChanceCard, {
+					chanceCardId,
+					targetIdList,
+				});
+				return;
+			}
+
+			if (allowRollDice) {
+				this.closeAIPreRollOperationSessionAndEmit(
+					playerId,
+					sessionId,
+					OperateType.RollDice,
+					undefined as PlayerOperationResult[OperateType.RollDice],
+				);
+			}
+			return;
+		}
+	}
+
 	/**
 	 * 处理客户端按钮点击操作
 	 * @param playerId 玩家ID
@@ -923,6 +1437,7 @@ export class GameProcess implements IGameProcess {
 		}
 
 		// 临时禁用按钮（防止重复点击）
+		this.aiDynamicButtonSchedulingSuppressed.add(playerId);
 		this.setButtonEnabled(playerId, buttonId, false);
 		config.enabled = false;
 
@@ -941,6 +1456,7 @@ export class GameProcess implements IGameProcess {
 			// 重新启用按钮
 			config.enabled = true;
 			this.setButtonEnabled(playerId, buttonId, true);
+			this.aiDynamicButtonSchedulingSuppressed.delete(playerId);
 		}
 	}
 
@@ -1107,56 +1623,54 @@ export class GameProcess implements IGameProcess {
 				role,
 				this.mapData.extraLibs,
 			);
+			player.isAI = Boolean(u.isAI);
+			player.setBankruptcyHandler((bankruptedPlayer) => this.releaseBankruptedPlayerAssets(bankruptedPlayer));
 			player.setPositionIndex(0);
 			this.players.set(player.id, player);
 
 			player.commandBus.setHandler("player.walk", async (payload) => {
 				this.setCurrentEventName(`${player.name} 正在走路`);
 				const { steps } = payload;
-				const sourceIndex = player.positionIndex;
 				const total = this.mapData.mapIndex.length;
 				const direction = steps > 0 ? 1 : -1;
 				const totalSteps = Math.abs(steps);
 
 				let currentStep = 0;
+				let cursorIndex = player.positionIndex;
 				const passedItems: { mapItemId: string; index: number; mapItem?: MapItem }[] = [];
 				let passedIndex = 0;
 
-				// 分段走路：每段检查是否有事件格，遇到事件格时触发事件后继续
+				// 分段走路：每段都基于玩家的当前逻辑位置继续推进，
+				// 这样经过事件里发生传送后，剩余步数会从新位置继续结算。
 				while (currentStep < totalSteps) {
-					// 计算当前段的起点
-					const segmentStartIndex = this.normalizeIndex(sourceIndex + currentStep * direction, total);
+					const segmentStartIndex = cursorIndex;
 
 					// 向前看，累积连续的无事件步数
 					let continuousSteps = 0;
 					while (currentStep + continuousSteps < totalSteps) {
-						const checkStep = currentStep + continuousSteps + 1;
-						const checkIndex = this.normalizeIndex(sourceIndex + checkStep * direction, total);
+						const checkStep = continuousSteps + 1;
+						const checkIndex = this.normalizeIndex(segmentStartIndex + checkStep * direction, total);
 						const mapItemId = this.mapData.mapIndex[checkIndex];
 
+						continuousSteps++;
 						if (this.checkMapItemHasPassedEvent(mapItemId)) {
-							// 遇到事件格，包括这一步并停止累积
-							continuousSteps++;
 							break;
 						}
-						continuousSteps++;
 					}
 
 					// 至少走一步
 					if (continuousSteps === 0) continuousSteps = 1;
 
-					const segmentEndIndex = this.normalizeIndex(sourceIndex + (currentStep + continuousSteps) * direction, total);
+					const segmentEndIndex = this.normalizeIndex(segmentStartIndex + continuousSteps * direction, total);
 
 					// 走这一段
 					await this.walkSegment(player, segmentStartIndex, continuousSteps * direction, totalSteps, currentStep + 1);
 					currentStep += continuousSteps;
-
-					// 不立即更新 positionIndex，避免动画期间的位置冲突
-					// 只在所有动画完成后才统一更新位置
+					cursorIndex = segmentEndIndex;
+					player.setPositionIndex(cursorIndex);
 
 					// 检查当前位置是否有事件
-					const currentIndex = this.normalizeIndex(sourceIndex + currentStep * direction, total);
-					const currentMapItemId = this.mapData.mapIndex[currentIndex];
+					const currentMapItemId = this.mapData.mapIndex[cursorIndex];
 
 					if (this.checkMapItemHasPassedEvent(currentMapItemId)) {
 						// 收集经过信息
@@ -1168,6 +1682,7 @@ export class GameProcess implements IGameProcess {
 						// 触发经过事件
 						try {
 							await this.handlePlayerPassedEvents(player, [currentMapItemId]);
+							cursorIndex = player.positionIndex;
 						} catch (error) {
 							console.error("经过事件执行失败:", error);
 							// 继续走路，不中断游戏
@@ -1175,9 +1690,7 @@ export class GameProcess implements IGameProcess {
 					}
 				}
 
-				// 最终位置更新：在所有动画完成后一次性更新
-				const finalIndex = this.normalizeIndex(sourceIndex + steps, total);
-				player.setPositionIndex(finalIndex);
+				player.setPositionIndex(cursorIndex);
 				this.gameDataBroadcast();
 
 				// 填充经过信息供 after 修饰器使用
@@ -1265,7 +1778,7 @@ export class GameProcess implements IGameProcess {
 
 	private async initProperties() {
 		// 步骤1: 为所有地皮设置 commandBus
-		this.properties.values().forEach((property) => {
+		this.properties.forEach((property) => {
 			property.commandBus.setHandler("property.arrived", async (payload) => {
 				const { arrivedPlayer, owner, toll } = payload;
 				if (owner) {
@@ -1348,7 +1861,7 @@ export class GameProcess implements IGameProcess {
 		}
 
 		// 步骤3: 执行每个地皮的 customInitFn
-		this.properties.values().forEach((property) => {
+		this.properties.forEach((property) => {
 			const customInitFn = property.getCustomInitFunction();
 			customInitFn && customInitFn(property, this);
 		});
@@ -1366,6 +1879,18 @@ export class GameProcess implements IGameProcess {
 			const postRestorePhase = new GamePhase(phaseInfo, undefined, this.mapData.extraLibs);
 			await this.runGamePhase(postRestorePhase);
 		}
+	}
+
+	private async releaseBankruptedPlayerAssets(player: Player) {
+		const properties = [...player.properties];
+		for (const property of properties) {
+			await property.setOwner(undefined);
+			await property.setLevel(0);
+		}
+		player.chanceCards = [];
+		player.isStop = 0;
+		player.stop = 0;
+		this.gameDataBroadcast();
 	}
 
 	private async gameLoop() {
@@ -1415,8 +1940,14 @@ export class GameProcess implements IGameProcess {
 						() => this.runGamePhase(phase, context),
 						`${player.name} 回合阶段: ${phase.name}`,
 					);
+					if (player.isBankrupted) break;
 				}
 				this.currentRoundPlayer = null;
+				if (player.isBankrupted) {
+					await this.checkGameOver();
+					if (this.isGameOver) break;
+					continue;
+				}
 				await player.commandBus.execute({ type: "player.round.end", payload: { player } });
 			}
 
@@ -1565,14 +2096,13 @@ export class GameProcess implements IGameProcess {
 				}
 
 				case TargetSelectType.ToMapItem: {
-					const targetPlayers = targetIdList.map((id) => this.players.get(id)).filter((p): p is Player => !!p);
-					if (targetPlayers.length === 0) throw new Error("选中的玩家不存在");
-					await this.executeChanceCardWithAnimation(
-						sourcePlayer,
-						chanceCard,
-						targetPlayers,
-						targetPlayers.map((t) => t.id),
-					);
+					const targetMapItemId = targetIdList[0];
+					if (!targetMapItemId) throw new Error("目标地图项不存在");
+					const targetMapItem = this.mapItems.get(targetMapItemId);
+					if (!targetMapItem) throw new Error("目标地图项不存在");
+					await this.executeChanceCardWithAnimation(sourcePlayer, chanceCard, targetMapItemId, [targetMapItem.id]);
+					this.msgNotifyBroadcast("info", `${sourcePlayer.name} 对格子 ${targetMapItem.type.name} 使用了机会卡: "${cardName}"`);
+					this.gameLogBroadcast(`${sourceLink} 对格子 ${targetMapItem.id} 使用了机会卡: ${cardLink}`);
 					break;
 				}
 
@@ -1794,7 +2324,17 @@ export class GameProcess implements IGameProcess {
 
 		// 如果玩家是AI托管，使用AI决策
 		if (player?.isAI) {
-			return await aiManager.makeDecision(player, operationType);
+			if (operationType === OperateType.RollDice || operationType === OperateType.UseChanceCard) {
+				const waitForOperation = operationListener.onceAsyncWithTimeout(playerId, operationType, {
+					timeout: options?.timeout ?? this.defaultTimeoutMs,
+					defaultValue: options?.defaultValue ?? (undefined as any),
+				});
+				this.ensureAIPreRollOperationBroker(player);
+				return await waitForOperation;
+			}
+			return await this.makeAIDecision(player, operationType, {
+				defaultValue: options?.defaultValue,
+			});
 		}
 
 		// 真实玩家，使用带超时的方法
@@ -1818,15 +2358,952 @@ export class GameProcess implements IGameProcess {
 		listener: (...args: any[]) => PlayerOperationResult[T],
 	): void {
 		operationListener.remove(playerId, operationType, listener);
+		if (operationType === OperateType.RollDice || operationType === OperateType.UseChanceCard) {
+			this.syncAIPreRollOperationSession(playerId);
+		}
 	}
 
 	public removePlayerAllOperationListener<T extends OperateType>(playerId: string, operationType?: T): void {
 		operationListener.removeAll(playerId, operationType);
+		if (
+			operationType === undefined ||
+			operationType === OperateType.RollDice ||
+			operationType === OperateType.UseChanceCard
+		) {
+			this.syncAIPreRollOperationSession(playerId);
+		}
+	}
+
+	private async makeAIDecision<T extends OperateType>(
+		player: Player,
+		operationType: T,
+		input?: {
+			option?: unknown;
+			defaultValue?: PlayerOperationResult[T];
+		},
+	): Promise<PlayerOperationResult[T]> {
+		const request = this.buildAIDecisionRequest(player, operationType, input?.option);
+		if (!request) {
+			console.log(`${AI_LOG_PREFIX} no request built`, {
+				playerId: player.id,
+				operationType,
+			});
+			return this.buildAIDefaultOperationResult(player, operationType, input?.option, input?.defaultValue);
+		}
+
+		this.attachAIDecisionChainContext(player, request);
+		this.ensureAIDecisionMetadata(request, player.id, `${String(operationType)}:${request.title}`);
+
+		console.log(`${AI_LOG_PREFIX} structured request`, {
+			decisionId: request.metadata?.decisionId,
+			playerId: player.id,
+			operationType,
+			title: request.title,
+			scene: request.scene,
+			chainContext: request.metadata?.chainContext,
+			options: request.options.map((option) => ({
+				id: option.id,
+				label: option.label,
+				actionType: option.actionType,
+			})),
+		});
+		const selection = await this.runAIDecision(player, request);
+		const result = this.mapAIDecisionSelectionToResult(player, request, selection, input?.option, input?.defaultValue);
+		this.rememberAIDecisionChain(player.id, request, selection);
+		aiManager.feedback({
+			playerId: player.id,
+			request,
+			selection,
+			outcome: "mapped-operation",
+		});
+		console.log(`${AI_LOG_PREFIX} mapped result`, {
+			decisionId: request.metadata?.decisionId,
+			playerId: player.id,
+			operationType,
+			selection,
+			result,
+		});
+		return result;
+	}
+
+	private isChainableAIDecisionScene(scene: AIDecisionRequest["scene"] | undefined): boolean {
+		return scene === "confirm-dialog" || scene === "target-select" || scene === "item-select" || scene === "form-dialog";
+	}
+
+	private appendAIDecisionSummary(base: string | undefined, fragment: string | undefined): string | undefined {
+		const normalizedBase = typeof base === "string" ? base.trim() : "";
+		const normalizedFragment = typeof fragment === "string" ? fragment.trim() : "";
+		if (!normalizedFragment) {
+			return normalizedBase || undefined;
+		}
+		if (!normalizedBase) {
+			return normalizedFragment;
+		}
+		return normalizedBase.includes(normalizedFragment) ? normalizedBase : `${normalizedBase} ${normalizedFragment}`;
+	}
+
+	private buildAIDecisionChainContext(player: Player, request: AIDecisionRequest): Record<string, unknown> | undefined {
+		if (!this.isChainableAIDecisionScene(request.scene)) {
+			this.aiDecisionChains.delete(player.id);
+			return undefined;
+		}
+		const eventName = this.currentEventName?.trim();
+		if (!eventName) {
+			this.aiDecisionChains.delete(player.id);
+			return undefined;
+		}
+		const currentRoundPlayerId = this.currentRoundPlayer?.id;
+		const currentRound = request.context.currentRound;
+		const existing = this.aiDecisionChains.get(player.id);
+		const canContinue =
+			Boolean(existing) &&
+			existing!.eventName === eventName &&
+			existing!.round === currentRound &&
+			existing!.currentRoundPlayerId === currentRoundPlayerId;
+		const previousDecisions = canContinue
+			? existing!.steps.slice(-2).map((step) => ({
+					title: step.title,
+					chosen: step.chosen,
+					summary: step.summary,
+				}))
+			: [];
+		const guidance =
+			previousDecisions.length > 0
+				? "这是同一串连续弹窗。默认延续上一步已做出的决定；除非当前约束显示不可执行，否则不要推翻前一步。"
+				: undefined;
+		return {
+			chainId: canContinue ? existing!.chainId : `chain-${player.id.slice(0, 6)}-${currentRound}-${randomString(4)}`,
+			step: previousDecisions.length + 1,
+			eventName,
+			previousDecisions,
+			guidance,
+		};
+	}
+
+	private attachAIDecisionChainContext(player: Player, request: AIDecisionRequest): void {
+		const chainContext = this.buildAIDecisionChainContext(player, request);
+		if (!chainContext) {
+			return;
+		}
+		request.metadata = {
+			...(request.metadata || {}),
+			chainContext,
+		};
+		const previousDecisionText = Array.isArray(chainContext.previousDecisions)
+			? chainContext.previousDecisions
+					.map((step) => {
+						if (typeof step !== "object" || step === null) {
+							return undefined;
+						}
+						const item = step as Record<string, unknown>;
+						const title = typeof item.title === "string" ? item.title : "";
+						const chosen = typeof item.chosen === "string" ? item.chosen : "";
+						const summary = typeof item.summary === "string" ? item.summary : "";
+						return [title, chosen || summary].filter(Boolean).join(" -> ");
+					})
+					.filter((item): item is string => Boolean(item))
+			: [];
+		if (previousDecisionText.length > 0) {
+			request.summary = this.appendAIDecisionSummary(
+				request.summary,
+				`连续决策上下文：上一步已决定 ${previousDecisionText.join("；")}。当前只需完成这一串操作。`,
+			);
+		}
+	}
+
+	private rememberAIDecisionChain(playerId: string, request: AIDecisionRequest, selection: AIDecisionSelection): void {
+		if (!this.isChainableAIDecisionScene(request.scene)) {
+			this.aiDecisionChains.delete(playerId);
+			return;
+		}
+		const chainContext = request.metadata?.chainContext;
+		if (typeof chainContext !== "object" || chainContext === null) {
+			return;
+		}
+		const currentRoundPlayerId = this.currentRoundPlayer?.id;
+		const chosenIds = selection.optionIds || (selection.optionId ? [selection.optionId] : []);
+		const chosenLabel = request.options.find((option) => chosenIds.includes(option.id))?.label;
+		const fieldSummary =
+			selection.fieldValues && Object.keys(selection.fieldValues).length > 0
+				? Object.entries(selection.fieldValues)
+						.map(([key, value]) => `${key}=${String(value)}`)
+						.join(", ")
+				: undefined;
+		const stepSummary =
+			request.scene === "form-dialog"
+				? selection.submitted
+					? fieldSummary || "已提交表单"
+					: "放弃提交"
+				: chosenLabel || fieldSummary;
+		const state: AIChainedDecisionState = {
+			chainId: typeof (chainContext as Record<string, unknown>).chainId === "string"
+				? ((chainContext as Record<string, unknown>).chainId as string)
+				: `chain-${playerId.slice(0, 6)}-${request.context.currentRound}`,
+			eventName:
+				typeof (chainContext as Record<string, unknown>).eventName === "string"
+					? ((chainContext as Record<string, unknown>).eventName as string)
+					: this.currentEventName,
+			round: request.context.currentRound,
+			currentRoundPlayerId,
+			steps: [
+				...((this.aiDecisionChains.get(playerId)?.steps || []).slice(-2)),
+				{
+					title: request.title,
+					scene: request.scene,
+					chosen: chosenLabel,
+					summary: stepSummary,
+				},
+			].slice(-3),
+			lastUpdatedAt: Date.now(),
+		};
+		this.aiDecisionChains.set(playerId, state);
+	}
+
+	private buildAIDecisionRequest<T extends OperateType>(
+		player: Player,
+		operationType: T,
+		option?: unknown,
+	): AIDecisionRequest<T> | null {
+		const context = this.buildAIDecisionContext(player);
+
+		switch (operationType) {
+			case OperateType.RollDice:
+				return {
+					operationType,
+					playerId: player.id,
+					title: "掷骰子",
+					context,
+					options: [
+						{
+							id: "__roll__",
+							label: "掷骰子",
+							actionType: "roll",
+							description: "继续当前回合，开始掷骰并移动。",
+						},
+					],
+				} as AIDecisionRequest<T>;
+			case OperateType.ConfirmDialogResult:
+				return this.buildConfirmDecisionRequest(player, context, option as ConfirmDialogOption) as AIDecisionRequest<T>;
+			case OperateType.TargetSelectDialogResult:
+				return this.buildTargetDecisionRequest(
+					player,
+					context,
+					option as TargetSelectDialogOption<TargetSelectType>,
+				) as AIDecisionRequest<T>;
+			case OperateType.ItemSelectDialogResult:
+				return this.buildItemDecisionRequest(player, context, option as ItemSelectDialogOption) as AIDecisionRequest<T>;
+			case OperateType.FormDialogResult:
+				return this.buildFormDecisionRequest(
+					player,
+					context,
+					option as FormDialogOption<FormField<string, any>[]>,
+				) as AIDecisionRequest<T>;
+			case OperateType.DynamicButtonClick:
+				return this.buildDynamicButtonDecisionRequest(player, context) as AIDecisionRequest<T>;
+			default:
+				return null;
+		}
+	}
+
+	private buildAIDecisionContext(player: Player): AIDecisionContextSnapshot {
+		const gameData = this.getGameData();
+		const playerRoles = gameData.players.map((item) => {
+			const roleId = item.user.roleId;
+			const role = roleId ? this.mapData.roles.find((candidate) => candidate.id === roleId) : undefined;
+			return {
+				playerId: item.id,
+				playerName: item.user.username,
+				isSelf: item.id === player.id,
+				isAI: item.isAI,
+				roleId,
+				roleName: role?.name,
+				roleDescription: role?.description,
+			};
+		});
+		return {
+			player: player.getPlayerInfo(),
+			players: gameData.players,
+			properties: gameData.properties,
+			mapItems: this.mapData.mapItems.map((item) => ({
+				id: item.id,
+				type: item.type,
+				x: item.x,
+				y: item.y,
+				rotation: item.rotation,
+				mapEventId: item.mapEventId,
+				linkto: item.linkto,
+				beLinked: item.beLinked,
+				property: item.property,
+			})),
+			mapIndex: [...this.mapData.mapIndex],
+			mapEvents: this.mapData.mapEvents.map((event) => ({
+				id: event.id,
+				type: event.type,
+				name: event.name,
+				description: event.description,
+			})),
+			systems: (gameData.exportData as Record<string, unknown> | undefined) || undefined,
+			playerRoles,
+			currentRound: gameData.currentRound,
+			currentMultiplier: gameData.currentMultiplier,
+			currentPlayerIdInRound: gameData.currentPlayerIdInRound,
+			map: {
+				id: this.mapData.id,
+				name: this.mapData.info.name,
+				description: this.mapData.info.description,
+				roles: this.mapData.roles.map((role) => ({
+					id: role.id,
+					name: role.name,
+					description: role.description,
+				})),
+			},
+		};
+	}
+
+	private buildDialogDecisionSummary(title?: string, content?: unknown): string | undefined {
+		const contentText =
+			typeof content === "string"
+				? this.normalizeDecisionText(content)
+				: this.extractDisplayText(content);
+		const titleText = this.normalizeDecisionText(title);
+		if (contentText && titleText && contentText !== titleText) {
+			return `${titleText}：${contentText}`;
+		}
+		return contentText || titleText;
+	}
+
+	private buildConfirmDecisionRequest(
+		player: Player,
+		context: AIDecisionContextSnapshot,
+		option?: ConfirmDialogOption,
+	): AIDecisionRequest<OperateType.ConfirmDialogResult> {
+		const confirmId = "__confirm__";
+		const cancelId = "__cancel__";
+		return {
+			operationType: OperateType.ConfirmDialogResult,
+			scene: "confirm-dialog",
+			playerId: player.id,
+			title: option?.title || "确认操作",
+			summary: this.buildDialogDecisionSummary(option?.title, option?.content),
+			context,
+			options: [
+				{
+					id: confirmId,
+					label: option?.confirmText || "确认",
+					actionType: "confirm",
+					description: this.buildDialogDecisionSummary(option?.title, option?.content),
+				},
+				{
+					id: cancelId,
+					label: option?.cancelText || "取消",
+					actionType: "cancel",
+					description: "放弃这一步，保持当前状态不变。",
+				},
+			],
+		};
+	}
+
+	private buildTargetDecisionRequest(
+		player: Player,
+		context: AIDecisionContextSnapshot,
+		option?: TargetSelectDialogOption<TargetSelectType>,
+	): AIDecisionRequest<OperateType.TargetSelectDialogResult> {
+		const options = this.buildTargetDecisionOptions(player, option?.type);
+		return {
+			operationType: OperateType.TargetSelectDialogResult,
+			scene: "target-select",
+			playerId: player.id,
+			title: option?.title || "选择目标",
+			summary: this.buildDialogDecisionSummary(option?.title, option?.content),
+			context,
+			options,
+			metadata: {
+				maxSelections: 1,
+			},
+		};
+	}
+
+	private buildTargetDecisionOptions(player: Player, type: TargetSelectType | undefined): AIDecisionOption[] {
+		switch (type) {
+			case TargetSelectType.ToSelf:
+				return [
+					{
+						id: player.id,
+						label: player.name,
+						actionType: "target",
+						description: `自己，现金 ${player.money}，地产 ${player.properties.length} 处。`,
+						payload: { id: player.id, type: "player" },
+					},
+				];
+			case TargetSelectType.ToOtherPlayer:
+			case TargetSelectType.ToPlayer:
+				return Array.from(this.players.values())
+					.filter((candidate) => type === TargetSelectType.ToPlayer || candidate.id !== player.id)
+					.map((candidate) => {
+						const info = candidate.getPlayerInfo();
+						return {
+							id: candidate.id,
+							label: candidate.name,
+							actionType: "target",
+							description: `现金 ${info.money}，地产 ${info.properties.length} 处${info.isBankrupted ? "，已破产" : ""}。`,
+							payload: {
+								id: candidate.id,
+								type: "player",
+								money: info.money,
+								propertyCount: info.properties.length,
+							},
+						};
+					});
+			case TargetSelectType.ToProperty:
+				return Array.from(this.properties.values()).map((property) => {
+					const info = property.getPropertyInfo();
+					return {
+						id: property.id,
+						label: property.name,
+						actionType: "target",
+						description: `售价 ${info.sellCost}，当前等级 ${info.level}/${info.maxLevel}，最高租金 ${Math.max(...info.costList, 0)}。`,
+						payload: {
+							id: property.id,
+							type: "property",
+							sellCost: info.sellCost,
+							rentPeak: Math.max(...info.costList, 0),
+							ownerId: info.owner?.userId,
+						},
+					};
+				});
+			case TargetSelectType.ToMapItem:
+				return this.mapData.mapItems.map((item) => ({
+					id: item.id,
+					label: item.property?.name || item.type.name || item.id,
+					actionType: "target",
+					description: item.property
+						? `关联地皮 ${item.property.name}${item.mapEventId ? `，事件 ${item.mapEventId}` : ""}。`
+						: item.mapEventId
+							? `地图事件 ${item.mapEventId}。`
+							: `地图格 ${item.type.name}。`,
+					payload: {
+						id: item.id,
+						type: "map-item",
+						mapEventId: item.mapEventId,
+						hasProperty: !!item.property,
+					},
+				}));
+			default:
+				return [];
+		}
+	}
+
+	private buildItemDecisionRequest(
+		player: Player,
+		context: AIDecisionContextSnapshot,
+		option?: ItemSelectDialogOption,
+	): AIDecisionRequest<OperateType.ItemSelectDialogResult> {
+		const maxSelections =
+			option?.multiple === true
+				? option.itemList.length
+				: typeof option?.multiple === "number"
+					? Math.max(1, option.multiple)
+					: 1;
+		const keyName = option?.keyName;
+		const options: AIDecisionOption[] = (option?.itemList || []).map((item: any, index) => {
+			const label = this.buildSelectorItemLabel(item, index, keyName);
+			const description = this.buildSelectorItemDescription(item, label);
+			return {
+				id: String(item?.id ?? index),
+				label,
+				description,
+				actionType: "select",
+				payload: {
+					id: item?.id ?? index,
+					type: "item",
+				},
+			};
+		});
+
+		if (option?.cancelText) {
+			options.push({
+				id: "__cancel__",
+				label: option.cancelText,
+				actionType: "cancel",
+				description: "不选择任何物品，直接返回。",
+			});
+		}
+
+		return {
+			operationType: OperateType.ItemSelectDialogResult,
+			scene: "item-select",
+			playerId: player.id,
+			title: option?.title || "选择物品",
+			summary: this.buildDialogDecisionSummary(option?.title, option?.content),
+			context,
+			options,
+			metadata: {
+				maxSelections,
+			},
+		};
+	}
+
+	private buildFormDecisionRequest(
+		player: Player,
+		context: AIDecisionContextSnapshot,
+		option?: FormDialogOption<FormField<string, any>[]>,
+	): AIDecisionRequest<OperateType.FormDialogResult> {
+		const formFields = (option?.fields || []).map((field) => ({
+			key: field.key,
+			label: field.label,
+			defaultValue: field.defaultValue,
+			min: field.min,
+			max: field.max,
+			valueType: typeof field.defaultValue === "number" ? "number" : "string",
+		}));
+		const defaultFieldValues = Object.fromEntries(
+			(option?.fields || []).map((field) => [field.key, field.defaultValue]),
+		);
+
+		return {
+			operationType: OperateType.FormDialogResult,
+			scene: "form-dialog",
+			playerId: player.id,
+			title: option?.title || "填写表单",
+			summary: this.buildDialogDecisionSummary(option?.title, option?.content),
+			context,
+			options: [
+				{
+					id: "__submit__",
+					label: option?.confirmText || "提交",
+					actionType: "submit",
+					description: "按当前判断提交表单。",
+				},
+				{
+					id: "__cancel__",
+					label: option?.cancelText || "取消",
+					actionType: "cancel",
+					description: "放弃这次填写，不提交表单。",
+				},
+			],
+			metadata: {
+				defaultFieldValues,
+				formFields,
+			},
+		};
+	}
+
+	private buildDynamicButtonDecisionRequest(
+		player: Player,
+		context: AIDecisionContextSnapshot,
+	): AIDecisionRequest<OperateType.DynamicButtonClick> | null {
+		const buttons = this.getPlayerButtons(player.id).filter(
+			(button) => button.visible && button.enabled && !this.shouldSkipAITurnDynamicButton(player.id, button),
+		);
+		if (buttons.length === 0) {
+			return null;
+		}
+
+		return {
+			operationType: OperateType.DynamicButtonClick,
+			scene: "active-action",
+			playerId: player.id,
+			title: "选择动态按钮",
+			context,
+			options: buttons.map((button) => ({
+				id: button.id,
+				label: button.text,
+				actionType: "dynamic-button",
+				description: `执行按钮操作：${button.text}`,
+				payload: {
+					id: button.id,
+					type: "button",
+				},
+			})),
+		};
+	}
+
+	private createAITurnActionState(): AITurnActionState {
+		return {
+			attemptedDynamicButtons: {},
+		};
+	}
+
+	private getAITurnActionState(playerId: string): AITurnActionState {
+		return this.aiTurnActionState.get(playerId) ?? this.createAITurnActionState();
+	}
+
+	private buildAIDynamicButtonSignature(text: string): string {
+		return JSON.stringify({
+			text: text.trim() || "按钮",
+		});
+	}
+
+	private shouldSkipAITurnDynamicButton(playerId: string, button: ButtonConfig): boolean {
+		const attemptedDynamicButtons = this.aiTurnActionState.get(playerId)?.attemptedDynamicButtons;
+		if (!attemptedDynamicButtons) {
+			return false;
+		}
+
+		const signature = this.buildAIDynamicButtonSignature(button.text);
+		return attemptedDynamicButtons[button.id] === signature;
+	}
+
+	private markAITurnDynamicButtonAttempt(
+		playerId: string,
+		buttonId: string,
+		text: string,
+	): void {
+		const previous = this.getAITurnActionState(playerId);
+		this.aiTurnActionState.set(playerId, {
+			...previous,
+			attemptedDynamicButtons: {
+				...previous.attemptedDynamicButtons,
+				[buttonId]: this.buildAIDynamicButtonSignature(text),
+			},
+		});
+	}
+
+	private buildAIPreRollOperationRequest(
+		player: Player,
+		optionsConfig: {
+			allowRollDice: boolean;
+			allowUseChanceCard: boolean;
+			blockedChanceCardIds?: ReadonlySet<string>;
+		},
+	): AIDecisionRequest<OperateType.RollDice> | null {
+		const context = this.buildAIDecisionContext(player);
+		const options: AIDecisionOption[] = [];
+		const blockedChanceCardIds = optionsConfig.blockedChanceCardIds ?? new Set<string>();
+
+		for (const button of this.getPlayerButtons(player.id)) {
+			if (!button.visible || !button.enabled || this.shouldSkipAITurnDynamicButton(player.id, button)) {
+				continue;
+			}
+			options.push({
+				id: `button:${button.id}`,
+				label: button.text,
+				actionType: "select",
+				description: `执行按钮操作：${button.text}`,
+				payload: {
+					id: button.id,
+					type: "button",
+					actionKind: "dynamic-button",
+				},
+			});
+		}
+
+		if (optionsConfig.allowUseChanceCard) {
+			for (const card of player.chanceCards) {
+				if (blockedChanceCardIds.has(card.getId())) {
+					continue;
+				}
+				options.push({
+					id: `chance-card:${card.getId()}`,
+					label: card.getName(),
+					description: card.getDescribe(),
+					actionType: "use-card",
+					summary: this.buildChanceCardDecisionSummary(card),
+					payload: {
+						id: card.getId(),
+						type: "chance-card",
+						actionKind: "use-chance-card",
+						targetType: card.getType(),
+					},
+				});
+			}
+		}
+
+		if (options.length === 0) {
+			return null;
+		}
+
+		if (optionsConfig.allowRollDice) {
+			options.push({
+				id: "__finish_pre_roll__",
+				label: "结束操作并掷骰",
+				actionType: "roll",
+				description: "结束本回合准备阶段，并立即进入掷骰移动。",
+			});
+		}
+
+		return {
+			operationType: OperateType.RollDice,
+			scene: "active-action",
+			playerId: player.id,
+			title: "选择主动行动或结束准备阶段",
+			context,
+			options,
+			metadata: {
+				maxSelections: 1,
+				finishActionId: "__finish_pre_roll__",
+			},
+		};
+	}
+
+	private buildChanceCardDecisionSummary(chanceCard: IChanceCard): string {
+		return `${chanceCard.getName()}：${chanceCard.getDescribe()}（目标类型：${chanceCard.getType()}）`;
+	}
+
+	private async buildAIChanceCardTargetIds(player: Player, chanceCardId: string): Promise<string[]> {
+		const chanceCard = player.getCardById(chanceCardId);
+		if (!chanceCard) {
+			console.log(`${AI_LOG_PREFIX} chance card target build failed`, {
+				playerId: player.id,
+				chanceCardId,
+				reason: "card_not_found",
+			});
+			return [];
+		}
+
+		if (chanceCard.getType() === TargetSelectType.ToSelf) {
+			console.log(`${AI_LOG_PREFIX} chance card target self`, {
+				playerId: player.id,
+				chanceCardId,
+			});
+			return [];
+		}
+
+		const request = this.buildTargetDecisionRequest(player, this.buildAIDecisionContext(player), {
+			title: `使用机会卡: ${chanceCard.getName()}`,
+			content: chanceCard.getDescribe(),
+			type: chanceCard.getType(),
+			confirmText: "使用",
+			cancelText: "取消",
+		});
+		this.ensureAIDecisionMetadata(request, player.id, `chance-card-target:${request.title}`);
+		const selection = await this.runAIDecision(player, request);
+		aiManager.feedback({
+			playerId: player.id,
+			request,
+			selection,
+			outcome: "chance-card-target",
+		});
+		const targetIds = selection.optionIds || (selection.optionId ? [selection.optionId] : []);
+		console.log(`${AI_LOG_PREFIX} chance card target selection`, {
+			decisionId: request.metadata?.decisionId,
+			playerId: player.id,
+			chanceCardId,
+			title: request.title,
+			selection,
+			targetIds,
+		});
+		return targetIds;
+	}
+
+	private extractDisplayText(display: unknown): string | undefined {
+		if (typeof display === "string") {
+			const normalized = display.trim();
+			return normalized || undefined;
+		}
+		if (!display || typeof display !== "object") {
+			return undefined;
+		}
+
+		const variableText = this.extractObjectStringByKeys(display, ["description", "summary", "content", "text", "label", "title", "name"]);
+		if (variableText) {
+			return variableText;
+		}
+
+		const record = display as { content?: unknown; variable?: unknown; children?: unknown };
+		if (typeof record.content === "string") {
+			const normalized = record.content.trim();
+			if (normalized) {
+				return normalized;
+			}
+		}
+		if (record.variable && typeof record.variable === "object") {
+			const variableContent = this.extractObjectStringByKeys(record.variable, ["description", "summary", "content", "text", "label", "title", "name"]);
+			if (variableContent) {
+				return variableContent;
+			}
+		}
+		if (Array.isArray(record.children)) {
+			for (const child of record.children) {
+				const childText = this.extractDisplayText(child);
+				if (childText) {
+					return childText;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private buildSelectorItemLabel(item: any, index: number, keyName?: PropertyKey): string {
+		const explicitLabel =
+			keyName !== undefined && item && typeof item === "object"
+				? item[keyName as keyof typeof item]
+				: undefined;
+		const label =
+			this.normalizeDecisionText(explicitLabel) ??
+			this.normalizeDecisionText(item?.name) ??
+			this.normalizeDecisionText(item?.title) ??
+			this.normalizeDecisionText(item?.label) ??
+			this.normalizeDecisionText(item?.summary) ??
+			this.normalizeDecisionText(item?.info?.name) ??
+			this.extractDisplayVariableText(item?.display, ["name", "title", "label"]) ??
+			this.normalizeDecisionText(item?.id);
+		return label || `选项${index + 1}`;
+	}
+
+	private buildSelectorItemDescription(item: any, label: string): string | undefined {
+		const description =
+			this.normalizeDecisionText(item?.description) ??
+			this.normalizeDecisionText(item?.summary) ??
+			this.normalizeDecisionText(item?.info?.description) ??
+			this.extractDisplayVariableText(item?.display, ["description", "summary", "content", "text"]) ??
+			this.extractDisplayText(item?.display);
+		if (!description || description === label) {
+			return undefined;
+		}
+		return description;
+	}
+
+	private extractDisplayVariableText(display: unknown, keys: string[]): string | undefined {
+		if (!display || typeof display !== "object" || !("variable" in display)) {
+			return undefined;
+		}
+		return this.extractObjectStringByKeys((display as { variable?: unknown }).variable, keys);
+	}
+
+	private extractObjectStringByKeys(source: unknown, keys: string[]): string | undefined {
+		return this.findObjectStringByKeys(source, keys, new Set<object>());
+	}
+
+	private normalizeDecisionText(value: unknown): string | undefined {
+		if (typeof value !== "string") {
+			return undefined;
+		}
+		const normalized = value.replace(/\s+/g, " ").trim();
+		return normalized || undefined;
+	}
+
+	private extractSummaryHeadline(summary: string | undefined): string | undefined {
+		const normalized = this.normalizeDecisionText(summary);
+		if (!normalized) {
+			return undefined;
+		}
+		const firstSegment = normalized.split(/[，,。:：;；|]/)[0]?.trim();
+		if (!firstSegment) {
+			return undefined;
+		}
+		const cleaned = firstSegment
+			.replace(/^(?:购买|买入|使用|发动|选择|选中|获取|获得|触发|执行|升级|查看|前往|移动到)\s+/u, "")
+			.replace(/^(?:物品|道具|卡牌|机会卡|地皮|角色|目标)\s+/u, "")
+			.trim();
+		return cleaned || firstSegment;
+	}
+
+	private findObjectStringByKeys(source: unknown, keys: string[], visited: Set<object>): string | undefined {
+		if (!source || typeof source !== "object") {
+			return undefined;
+		}
+		if (visited.has(source as object)) {
+			return undefined;
+		}
+		visited.add(source as object);
+
+		for (const key of keys) {
+			const value = (source as Record<string, unknown>)[key];
+			const normalized = this.normalizeDecisionText(value);
+			if (normalized) {
+				return normalized;
+			}
+		}
+
+		if (Array.isArray(source)) {
+			for (const item of source) {
+				const nested = this.findObjectStringByKeys(item, keys, visited);
+				if (nested) {
+					return nested;
+				}
+			}
+			return undefined;
+		}
+
+		for (const value of Object.values(source as Record<string, unknown>)) {
+			const nested = this.findObjectStringByKeys(value, keys, visited);
+			if (nested) {
+				return nested;
+			}
+		}
+		return undefined;
+	}
+
+	private buildAIDefaultOperationResult<T extends OperateType>(
+		player: Player,
+		operationType: T,
+		option?: unknown,
+		fallback?: PlayerOperationResult[T],
+	): PlayerOperationResult[T] {
+		if (fallback !== undefined) {
+			return fallback;
+		}
+
+		switch (operationType) {
+			case OperateType.RollDice:
+				return undefined as PlayerOperationResult[T];
+			case OperateType.ConfirmDialogResult:
+				return { id: player.id, confirm: false } as PlayerOperationResult[T];
+			case OperateType.TargetSelectDialogResult:
+				return { target: [] } as unknown as PlayerOperationResult[T];
+			case OperateType.ItemSelectDialogResult:
+				return { selected: [] } as unknown as PlayerOperationResult[T];
+			case OperateType.FormDialogResult:
+				return this.buildDefaultFormResult((option as FormDialogOption<FormField<string, any>[]>)?.fields || []) as PlayerOperationResult[T];
+			case OperateType.DynamicButtonClick:
+				return { buttonId: "", success: false } as PlayerOperationResult[T];
+			default:
+				return undefined as PlayerOperationResult[T];
+		}
+	}
+
+	private mapAIDecisionSelectionToResult<T extends OperateType>(
+		player: Player,
+		request: AIDecisionRequest<T>,
+		selection: AIDecisionSelection,
+		option?: unknown,
+		fallback?: PlayerOperationResult[T],
+	): PlayerOperationResult[T] {
+		switch (request.operationType) {
+			case OperateType.RollDice:
+				return undefined as PlayerOperationResult[T];
+			case OperateType.ConfirmDialogResult: {
+				const confirm = selection.optionId === "__confirm__";
+				return { id: player.id, confirm } as PlayerOperationResult[T];
+			}
+			case OperateType.TargetSelectDialogResult: {
+				const target = selection.optionIds || (selection.optionId ? [selection.optionId] : []);
+				return { target } as PlayerOperationResult[T];
+			}
+			case OperateType.ItemSelectDialogResult: {
+				const selected = (selection.optionIds || (selection.optionId ? [selection.optionId] : [])).filter(
+					(id) => id !== "__cancel__",
+				);
+				return { selected } as PlayerOperationResult[T];
+			}
+			case OperateType.FormDialogResult: {
+				const defaultResult = this.buildDefaultFormResult(
+					(option as FormDialogOption<FormField<string, any>[]>)?.fields || [],
+				);
+				const submitted =
+					selection.submitted === true ||
+					(selection.submitted === undefined && selection.optionId === "__submit__");
+				return {
+					...defaultResult,
+					...(selection.fieldValues || {}),
+					submitted,
+				} as PlayerOperationResult[T];
+			}
+			case OperateType.DynamicButtonClick:
+				return {
+					buttonId: selection.optionId || "",
+					success: !!selection.optionId,
+				} as PlayerOperationResult[T];
+			default:
+				return this.buildAIDefaultOperationResult(player, request.operationType, option, fallback);
+		}
 	}
 
 	private async waitInitFinished() {
 		const promiseArr: Promise<any>[] = [];
 		Array.from(this.players.values()).forEach((player) => {
+			if (player.isAI) return;
 			promiseArr.push(operationListener.onceAsync(player.id, OperateType.GameInitFinished));
 		});
 		await Promise.all(promiseArr);
@@ -1858,7 +3335,7 @@ export class GameProcess implements IGameProcess {
 	private async executeChanceCardWithAnimation(
 		sourcePlayer: IPlayer,
 		chanceCard: IChanceCard,
-		target: IPlayer | IProperty | IPlayer[] | IProperty[],
+		target: IPlayer | IProperty | string | IPlayer[] | IProperty[],
 		targetIdListForAnim: string[],
 	) {
 		const animationId = randomString(16);
@@ -1970,7 +3447,11 @@ export class GameProcess implements IGameProcess {
 
 		// 如果玩家是AI托管，直接返回决策，不显示对话框
 		if (player?.isAI) {
-			return (await aiManager.makeDecision(player, OperateType.ConfirmDialogResult, option)) as ConfirmDialogResult;
+			console.log(`${AI_LOG_PREFIX} intercept confirm dialog for AI`, {
+				playerId,
+				title: option.title,
+			});
+			return (await this.makeAIDecision(player, OperateType.ConfirmDialogResult, { option })) as ConfirmDialogResult;
 		}
 
 		// 真实玩家，显示对话框
@@ -1999,11 +3480,14 @@ export class GameProcess implements IGameProcess {
 
 		// 如果玩家是AI托管，直接返回决策，不显示对话框
 		if (player?.isAI) {
-			return (await aiManager.makeDecision(
-				player,
-				OperateType.TargetSelectDialogResult,
+			console.log(`${AI_LOG_PREFIX} intercept target dialog for AI`, {
+				playerId,
+				title: option.title,
+				type: option.type,
+			});
+			return (await this.makeAIDecision(player, OperateType.TargetSelectDialogResult, {
 				option,
-			)) as TargetSelectDialogResult<I>;
+			})) as TargetSelectDialogResult<I>;
 		}
 
 		// 真实玩家，显示对话框
@@ -2031,11 +3515,14 @@ export class GameProcess implements IGameProcess {
 
 		// 如果玩家是AI托管，直接返回决策，不显示对话框
 		if (player?.isAI) {
-			return (await aiManager.makeDecision(
-				player,
-				OperateType.ItemSelectDialogResult,
+			console.log(`${AI_LOG_PREFIX} intercept item dialog for AI`, {
+				playerId,
+				title: option.title,
+				itemCount: option.itemList?.length || 0,
+			});
+			return (await this.makeAIDecision(player, OperateType.ItemSelectDialogResult, {
 				option,
-			)) as ItemSelectDialogResult;
+			})) as ItemSelectDialogResult;
 		}
 
 		// 真实玩家，显示对话框
@@ -2070,7 +3557,14 @@ export class GameProcess implements IGameProcess {
 
 		// 如果玩家是 AI 托管，直接返回决策，不显示对话框
 		if (player?.isAI) {
-			return (await aiManager.makeDecision(player, OperateType.FormDialogResult, option)) as FormDialogResult<F>;
+			console.log(`${AI_LOG_PREFIX} intercept form dialog for AI`, {
+				playerId,
+				title: option.title,
+				fieldCount: option.fields?.length || 0,
+			});
+			return (await this.makeAIDecision(player, OperateType.FormDialogResult, {
+				option,
+			})) as FormDialogResult<F>;
 		}
 
 		// 真实玩家，显示表单对话框
@@ -2158,13 +3652,230 @@ export class GameProcess implements IGameProcess {
 		}
 	}
 
+	private abbreviateAIThought(text: string, maxLength: number): string {
+		const normalized = text.replace(/\s+/g, " ").trim();
+		if (!normalized) return "";
+		if (normalized.length <= maxLength) return normalized;
+		return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+	}
+
+	private stripMessageCardRichText(text: string): string {
+		return text
+			.replace(/<br\s*\/?>/gi, "，")
+			.replace(/<[^>]+>/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+	}
+
+	private appendMessageCardTextFragment(fragments: string[], value: unknown): void {
+		const normalized =
+			typeof value === "string"
+				? this.stripMessageCardRichText(value)
+				: this.normalizeDecisionText(value);
+		if (!normalized || fragments.includes(normalized)) {
+			return;
+		}
+		fragments.push(normalized);
+	}
+
+	private collectMessageCardStructuredText(source: unknown, fragments: string[], visited: Set<object>): void {
+		if (!source || typeof source !== "object") {
+			return;
+		}
+		if (visited.has(source as object)) {
+			return;
+		}
+		visited.add(source as object);
+
+		if (Array.isArray(source)) {
+			for (const item of source) {
+				this.collectMessageCardStructuredText(item, fragments, visited);
+			}
+			return;
+		}
+
+		const record = source as Record<string, unknown>;
+		for (const key of ["title", "name", "label", "summary", "description", "content", "text"]) {
+			this.appendMessageCardTextFragment(fragments, record[key]);
+		}
+
+		if (record.variable && typeof record.variable === "object") {
+			this.collectMessageCardStructuredText(record.variable, fragments, visited);
+		}
+		if (Array.isArray(record.children)) {
+			for (const child of record.children) {
+				this.collectMessageCardStructuredText(child, fragments, visited);
+			}
+		}
+	}
+
+	private extractMessageCardContentText(content: MessageCardOption["content"]): string {
+		if (typeof content === "string") {
+			return this.stripMessageCardRichText(content);
+		}
+		const fragments: string[] = [];
+		this.collectMessageCardStructuredText(content, fragments, new Set<object>());
+		return fragments.join("，");
+	}
+
+	private extractAIMessageCardSummary(option: MessageCardOption, maxLength: number = 24): string | undefined {
+		const candidates = [
+			option.title,
+			this.extractMessageCardContentText(option.content),
+		];
+		const genericTitles = new Set(["提示", "消息", "信息", "通知", "提醒"]);
+		for (const candidate of candidates) {
+			const trimmed = candidate?.trim();
+			if (!trimmed) continue;
+			if (genericTitles.has(trimmed)) continue;
+			return this.abbreviateAIThought(trimmed, maxLength);
+		}
+		return undefined;
+	}
+
+	private buildMessageCardAIReactionPrompt(option: MessageCardOption): AIDecisionPrompt<"scripted-action"> {
+		const title = this.abbreviateAIThought(option.title || "提示", 32) || "提示";
+		const rawContent = this.extractMessageCardContentText(option.content);
+		const contentSummary = this.abbreviateAIThought(rawContent, 160);
+		const humanSummary = this.extractAIMessageCardSummary(option, 36) || title;
+		const summaryParts = [
+			"你刚收到一张 showMessageCard 提示卡，请把它当作游戏内即时信息。",
+			`标题：${title}。`,
+			contentSummary ? `内容：${contentSummary}。` : "内容：这张卡主要是界面化提示，请结合标题理解。",
+			"请用玩家第一人称、口语化地说 1 句即时反应。",
+			"把这句话放进 chatMessages[0]，不要复述按钮词、技术词或 JSON 结构。",
+		];
+		return {
+			operationType: "scripted-action",
+			scene: "scripted-action",
+			title: `收到提示卡：${title}`,
+			summary: summaryParts.join(" "),
+			options: [
+				{
+					id: "__acknowledge_message_card__",
+					label: "收到信息并说一句自然反应",
+					actionType: "acknowledge",
+					description: "理解提示卡内容，给出一句自然聊天发言，不执行额外游戏动作。",
+					summary: `就“${humanSummary}”做出一句即时反应。`,
+					payload: {
+						title,
+						content: contentSummary,
+						type: "message-card",
+						actionKind: "message-card-reaction",
+					},
+				},
+			],
+			metadata: {
+				messageCardTitle: title,
+				messageCardContent: contentSummary,
+				chatOnly: true,
+			},
+		};
+	}
+
+	private async requestAIMessageCardReaction(playerId: string, option: MessageCardOption): Promise<void> {
+		try {
+			await this.requestAIDecision(playerId, this.buildMessageCardAIReactionPrompt(option));
+		} catch (error) {
+			console.warn(`${AI_LOG_PREFIX} message card reaction failed`, {
+				playerId,
+				title: option.title,
+				error,
+			});
+		}
+	}
+
 	public async showMessageCard(playerIds: string[], option: MessageCardOption): Promise<void> {
+		for (const playerId of playerIds) {
+			const player = this.players.get(playerId);
+			if (!player?.isAI) continue;
+			void this.requestAIMessageCardReaction(playerId, option);
+		}
 		sendToUsers(playerIds, {
 			type: SocketMsgType.MessageCard,
 			source: SocketMsgSource.Server,
 			data: { option },
 		});
 		await this.sleep(option.duration);
+	}
+
+	public async requestAIDecision(playerId: string, prompt: AIDecisionPrompt): Promise<AIDecisionSelection | null> {
+		const player = this.players.get(playerId);
+		if (!player?.isAI) {
+			console.log(`${AI_LOG_PREFIX} requestAIDecision ignored`, {
+				playerId,
+				reason: "player_not_ai",
+				title: prompt.title,
+			});
+			return null;
+		}
+
+		const request: AIDecisionRequest = {
+			...prompt,
+			playerId,
+			context: this.buildAIDecisionContext(player),
+		};
+		this.ensureAIDecisionMetadata(request, playerId, `scripted:${request.title}`);
+
+		try {
+			console.log(`${AI_LOG_PREFIX} scripted request`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				title: request.title,
+				operationType: request.operationType,
+				scene: request.scene,
+				options: request.options.map((option) => ({
+					id: option.id,
+					label: option.label,
+					actionType: option.actionType,
+				})),
+			});
+			const selection = await this.runAIDecision(player, request);
+			aiManager.feedback({
+				playerId,
+				request,
+				selection,
+				outcome: "scripted",
+			});
+			console.log(`${AI_LOG_PREFIX} scripted selection`, {
+				decisionId: request.metadata?.decisionId,
+				playerId,
+				title: request.title,
+				selection,
+			});
+			return selection;
+		} finally {
+		}
+	}
+
+	private async runAIDecision(player: Player, request: AIDecisionRequest): Promise<AIDecisionSelection> {
+		if (player.beginAIThinking()) {
+			this.gameDataBroadcast();
+		}
+
+		try {
+			return await aiManager.decide(request);
+		} finally {
+			if (player.endAIThinking()) {
+				this.gameDataBroadcast();
+			}
+		}
+	}
+
+	private ensureAIDecisionMetadata(request: AIDecisionRequest, playerId: string, label: string): void {
+		const decisionId =
+			typeof request.metadata?.decisionId === "string" && request.metadata.decisionId
+				? request.metadata.decisionId
+				: this.createAIDecisionId(playerId);
+		request.metadata = {
+			...(request.metadata || {}),
+			decisionId,
+			traceLabel: request.metadata?.traceLabel || label,
+		};
+	}
+
+	private createAIDecisionId(playerId: string): string {
+		return `ai-${playerId.slice(0, 6)}-${randomString(6)}`;
 	}
 
 	private sleep(ms: number) {
@@ -2307,6 +4018,7 @@ export class GameProcess implements IGameProcess {
 			]),
 			animationCompletionHandlers: Array.from(this.animationCompletionHandlers.keys()),
 			rankedPlayerIds: [...this.rankedPlayerIds],
+			aiStrategyStates: aiManager.getAllStrategyStates(),
 		};
 		return JSON.parse(JSON.stringify(raw));
 	}
@@ -2320,6 +4032,8 @@ export class GameProcess implements IGameProcess {
 	 * @param playerId - 当前回合玩家的 ID
 	 */
 	public roundTurnNotify(playerId: string) {
+		this.invalidateAIPreRollOperationSession(playerId);
+		this.aiTurnActionState.set(playerId, this.createAITurnActionState());
 		this.gameBroadcast({
 			type: SocketMsgType.RoundTurn,
 			source: SocketMsgSource.Server,
@@ -2371,6 +4085,16 @@ export class GameProcess implements IGameProcess {
 	 * @param playerId 玩家ID
 	 */
 	private cleanupPlayerButtons(playerId: string): void {
+		const timer = this.aiDynamicButtonTimers.get(playerId);
+		if (timer) {
+			clearTimeout(timer);
+			this.aiDynamicButtonTimers.delete(playerId);
+		}
+		this.aiDynamicButtonInFlight.delete(playerId);
+		this.aiDynamicButtonSchedulingSuppressed.delete(playerId);
+		this.invalidateAIPreRollOperationSession(playerId);
+		this.aiTurnActionState.delete(playerId);
+
 		const playerButtons = this.playerButtons.get(playerId);
 		if (!playerButtons) {
 			return;
@@ -2413,6 +4137,14 @@ export class GameProcess implements IGameProcess {
 	public handlePlayerReconnect(userId: string) {
 		const player = this.players.get(userId);
 		if (player) {
+			const timer = this.aiDynamicButtonTimers.get(userId);
+			if (timer) {
+				clearTimeout(timer);
+				this.aiDynamicButtonTimers.delete(userId);
+			}
+			this.aiDynamicButtonInFlight.delete(userId);
+			this.aiDynamicButtonSchedulingSuppressed.delete(userId);
+			this.invalidateAIPreRollOperationSession(userId);
 			player.setIsOffline(false);
 			// 取消AI托管
 			player.isAI = false;
@@ -2501,7 +4233,7 @@ export class GameProcess implements IGameProcess {
 		// 停止心跳机制
 		this.stopHeartbeat();
 
-		this.players.keys().forEach((playerId) => {
+		this.players.forEach((_player, playerId) => {
 			operationListener.removeAll(playerId);
 		});
 		operationListener.clearAllTimers();

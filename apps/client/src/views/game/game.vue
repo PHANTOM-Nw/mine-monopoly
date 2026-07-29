@@ -13,7 +13,7 @@
 		Fragment,
 	} from "vue";
 	import { GameRenderer } from "@src/core/renderer/GameRenderer";
-	import { useLoading, useUtil } from "@src/store";
+	import { useLoading, useRoomInfo, useUtil } from "@src/store";
 	import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 	import router from "@src/router/index";
 	import { MonopolyClient, useMonopolyClient, destoryMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
@@ -30,16 +30,21 @@
 	import { useAudioManager } from "@src/utils/audio/AudioManager";
 	import { SoundName } from "@src/utils/audio/types";
 	import useEventBus from "@src/utils/event-bus";
+	import { FPMessageBox } from "@src/components/utils/fp-message-box";
+	import { buildGameInitDiagnostics, wrapGameInitError } from "@src/utils/game-init-diagnostics";
+	import { ErrorCategory, logErrorWithOptions } from "@src/utils/log";
 	import { storeToRefs } from "pinia";
 	import UiRenderer from "@src/components/utils/ui-renderer/ui-renderer.vue";
 	import FpErrorBoundary from "@src/components/utils/fp-error-boundary/index.vue";
 	//pinia仓库
 	const mapDataStore = useMapData();
 	const userInfoStore = useUserInfo();
+	const roomInfoStore = useRoomInfo();
 	const gameDataStore = useGameData();
 
 	const windowWidth = computed(() => window.innerWidth);
 	const windowHeight = computed(() => window.innerHeight);
+	const amISpectator = computed(() => roomInfoStore.amISpectator);
 
 	const currentPlayerId = computed(() => userInfoStore.userId);
 	const gameDataState = computed(() => gameDataStore.$state);
@@ -59,6 +64,35 @@
 		}
 	}
 
+	function renderInitFailureDialog(lines: string[]) {
+		return h("div", { style: "max-width: 44rem;" }, [
+			h(
+				"div",
+				{
+					style: "margin-bottom: 0.75rem; font-weight: 600; color: var(--fp-color-primary, #333);",
+				},
+				"初始化失败。请截图下面完整内容发给开发者。",
+			),
+			h(
+				"pre",
+				{
+					style: [
+						"margin: 0",
+						"padding: 0.9rem 1rem",
+						"border-radius: 0.5rem",
+						"background: rgba(0, 0, 0, 0.06)",
+						"white-space: pre-wrap",
+						"word-break: break-word",
+						"overflow-wrap: anywhere",
+						"font-size: 0.92rem",
+						"line-height: 1.55",
+					].join("; "),
+				},
+				lines.join("\n"),
+			),
+		]);
+	}
+
 	onMounted(async () => {
 		try {
 			socketClient = useMonopolyClient();
@@ -71,7 +105,7 @@
 			const canvas = document.getElementById("game-canvas") as HTMLCanvasElement;
 			const container = document.getElementsByClassName("game-page")[0] as HTMLDivElement;
 			if (!canvas || !container) {
-				throw new Error("游戏画布元素未找到");
+				throw wrapGameInitError("game-page-mounted", new Error("游戏画布元素未找到"));
 			}
 			const mapData = JSON.parse(JSON.stringify(mapDataStore.$state)) as GameMap;
 			console.log("🚀 ~ mapData:", mapData);
@@ -82,8 +116,12 @@
 			// 恢复心跳检测
 			socketClient.resumeHeartBeat();
 
-			useLoading().showLoading("数据加载完成，等待其他玩家加载...");
-			socketClient.gameInitFinished();
+			if (amISpectator.value) {
+				useLoading().hideLoading();
+			} else {
+				useLoading().showLoading("数据加载完成，等待其他玩家加载...");
+				socketClient.gameInitFinished();
+			}
 
 			// 监听玩家金钱变化事件
 			const audioManager = useAudioManager();
@@ -137,8 +175,31 @@
 		} catch (e: any) {
 			// 异常时也要恢复心跳，防止永久暂停
 			socketClient?.resumeHeartBeat();
-			console.error(e);
+			const diagnostics = buildGameInitDiagnostics(e, {
+				mapName: mapDataStore.info?.name || "unknown",
+				route: window.location.pathname,
+			});
+			console.error("[GameInitFailure]", diagnostics, e);
+			logErrorWithOptions({
+				category: ErrorCategory.UI_RENDER,
+				type: diagnostics.errorCode,
+				message: diagnostics.logMessage,
+				error:
+					e instanceof Error
+						? e
+						: diagnostics.logStack
+							? ({ message: diagnostics.rawMessage, stack: diagnostics.logStack } as Error)
+							: undefined,
+				extraInfo: diagnostics.extraInfo,
+				context: diagnostics.context,
+			});
 			useLoading().hideLoading();
+			await FPMessageBox({
+				title: "游戏初始化失败",
+				content: renderInitFailureDialog(diagnostics.lines),
+				confirmText: "返回房间",
+				showCancel: false,
+			}).catch(() => {});
 			router.replace({ name: "room-router" });
 		}
 	});
@@ -189,7 +250,12 @@
 				<ChanceCardContainer />
 
 				<!-- 游戏按钮面板：包含骰子按钮和动态按钮 -->
-				<GameButtonsPanel :player-id="currentPlayerId" title="操作面板" @rollDice="handleRollDice" />
+				<GameButtonsPanel
+					:player-id="currentPlayerId"
+					title="操作面板"
+					:spectator-message="amISpectator ? '你正在旁观本局，游戏操作将完全由 AI 自行完成。' : ''"
+					@rollDice="handleRollDice"
+				/>
 
 				<teleport to="body">
 					<CountdownTimer />
@@ -262,4 +328,5 @@
 		pointer-events: initial;
 	}
 }
+
 </style>

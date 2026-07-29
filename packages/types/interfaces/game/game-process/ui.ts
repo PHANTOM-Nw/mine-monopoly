@@ -111,6 +111,7 @@ export interface FormField<K extends string, D> {
 
 	/** 最大值（仅 number-input 有效） */
 	max?: number;
+
 }
 
 /**
@@ -163,6 +164,7 @@ export interface ItemSelectDialogOption<T = SelectorItem> extends Omit<DialogOpt
 
 	/** 对话框内容（字符串或 UI Schema），显示在物品列表之前（可选） */
 	content?: string | UISchema;
+
 }
 
 /**

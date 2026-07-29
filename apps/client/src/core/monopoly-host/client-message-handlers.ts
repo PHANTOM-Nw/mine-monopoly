@@ -86,6 +86,10 @@ const handleReadyToggle: ClientMessageHandler<SocketMsgType.ReadyToggle> = (conn
 };
 const handleKickOut: ClientMessageHandler<SocketMsgType.KickOut> = (conn, msg, host, clientId) => {
 	const playerId = msg.data;
+	if (host.getRoom().isAiPlayer(playerId)) {
+		host.getRoom().removeAiPlayer(playerId);
+		return;
+	}
 	host.getRoom().sendToClientById(playerId, SocketMsgType.KickOut);
 	host.getRoom().leave(playerId);
 	host.deleteClient(playerId);
@@ -94,7 +98,6 @@ const handleChangeColor: ClientMessageHandler<SocketMsgType.ChangeColor> = (conn
 	host.getRoom().changeColor(clientId, msg.data);
 };
 const handleChangeMap: ClientMessageHandler<SocketMsgType.ChangeMap> = (conn, msg, host, clientId) => {
-	console.log("[ChangeMap] 6.host.handleChangeMap: 收到 ChangeMap, from=", msg.data.from, "dataLen=", (msg.data.data as string)?.length);
 	host.getRoom().changeMap(msg.data);
 };
 const handleChangeRole: ClientMessageHandler<SocketMsgType.ChangeRole> = (conn, msg, host, clientId) => {

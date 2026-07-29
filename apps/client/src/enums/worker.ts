@@ -16,6 +16,9 @@ export enum WorkerCommType {
 	EmitOperation,
 	UserOffLine,
 	UserReconnect,
+	UpdateAIDecisionConfig,
+	ClearAIStrategyMemory,
+	AIDecisionResponse,
 
 	// Debug (dev only)
 	DebugGetState,
@@ -27,6 +30,7 @@ export enum WorkerCommType {
 	GameStart,
 	GameOver,
 	GameProcessReady,
+	RequestAIDecision,
 
 	// ????
 	RequestSnapshot,

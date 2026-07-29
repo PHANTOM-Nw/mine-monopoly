@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import {
+	AIDecisionConfig,
 	ChatMessage,
 	FormSchema,
 	GameLog,
@@ -14,6 +15,7 @@ import {
 import { isFullScreen, isLandscape, setTimeOutAsync } from "@src/utils";
 import { getUserByToken } from "@src/utils/api/user";
 import { getPlatformType } from "@src/utils/platform";
+import { normalizeAIDecisionConfig } from "@src/core/ai/ai-decision-config";
 import { useGameData } from "./game";
 
 /**
@@ -103,6 +105,7 @@ export const useRoomInfo = defineStore("roomInfo", {
 	getters: {
 		amIRoomOwner: (state) => useUserInfo().userId === state.ownerId,
 		isReady: (state) => state.userList.find((user) => user.userId === useUserInfo().userId)?.isReady ?? false,
+		amISpectator: (state) => Boolean(state.userList.find((user) => user.userId === useUserInfo().userId)?.isSpectator),
 	},
 });
 
@@ -113,6 +116,14 @@ export const useUtil = defineStore("util", {
 			fps: 0,
 			/** 连接模式：unknown=未确定, p2p=直连, relay=TURN中继 */
 			connectionMode: "unknown" as "unknown" | "p2p" | "relay",
+			/** 当前连接策略：auto=优先直连, relay=强制中继 */
+			connectionPolicy: "auto" as "auto" | "relay",
+			/** 面向用户的连接状态说明 */
+			connectionStatusText: "等待连接" as string,
+			/** 最近一次连接异常原因 */
+			connectionStatusReason: "" as string,
+			/** 当前重连尝试次数 */
+			connectionReconnectAttempt: 0,
 			isRollDiceAnimationPlay: false,
 			rollDiceResult: new Array<number>(),
 			currentEventName: "",
@@ -273,11 +284,14 @@ export const useSettig = defineStore("setting", {
 			sfxMuted: false,
 			musicMuted: false,
 			lockRole: true,
+			enableTurnFocus: true,
+			chatRenderMode: "bubble" as "danmaku" | "bubble",
 			// 画面质量设置：低/中/高三档
 			graphicQuality: "medium" as "low" | "medium" | "high",
 			// 阴影开关
 			enableShadow: false,
 			enableModelAnimation: true,
+			aiDecisionConfig: normalizeAIDecisionConfig(undefined) as AIDecisionConfig,
 		};
 	},
 	actions: {

@@ -13,15 +13,28 @@ import { useRoomInfo, useChat, useGameLog } from "@src/store";
 import { useGameData } from "@src/store/game";
 import router from "@src/router";
 import LogPanel from "@src/components/log-panel";
+import AiSettingPanel from "./ai-setting-panel.vue";
 
 const settingVisible = ref(false);
 const logPanelVisible = ref(false);
+const aiSettingVisible = ref(false);
 
 // 暴露 window 对象给模板使用
 const win = window as any;
+const hasStandaloneAIConsole = computed(() => Boolean(win.platformAPI?.openAIConsole));
+const aiEntryLabel = computed(() => (hasStandaloneAIConsole.value ? "打开 AI 控制台" : "打开 AI 设置"));
 
 const openInspector = () => {
 	window.platformAPI?.openInspector?.();
+};
+
+const openAISettings = () => {
+	if (hasStandaloneAIConsole.value) {
+		settingVisible.value = false;
+		window.platformAPI?.openAIConsole?.();
+		return;
+	}
+	aiSettingVisible.value = true;
 };
 
 const openLogsFolder = () => {
@@ -79,6 +92,8 @@ const qualityLabels = {
 
 // 临时状态：用户选择但未应用
 const tempLockRole = ref(settingStore.lockRole);
+const tempEnableTurnFocus = ref(settingStore.enableTurnFocus);
+const tempChatRenderMode = ref<"danmaku" | "bubble">(settingStore.chatRenderMode);
 const tempGraphicQuality = ref<"low" | "medium" | "high">(settingStore.graphicQuality);
 const tempEnableShadow = ref(settingStore.enableShadow);
 const tempEnableModelAnimation = ref(settingStore.enableModelAnimation);
@@ -93,6 +108,8 @@ const tempMusicMuted = ref(settingStore.musicMuted);
 watch(settingVisible, (isOpen) => {
 	if (isOpen) {
 		tempLockRole.value = settingStore.lockRole;
+		tempEnableTurnFocus.value = settingStore.enableTurnFocus;
+		tempChatRenderMode.value = settingStore.chatRenderMode;
 		tempGraphicQuality.value = settingStore.graphicQuality;
 		tempEnableModelAnimation.value = settingStore.enableModelAnimation;
 		tempEnableShadow.value = settingStore.enableShadow;
@@ -109,6 +126,8 @@ watch(settingVisible, (isOpen) => {
 const hasChanges = computed(() => {
 	return (
 		tempLockRole.value !== settingStore.lockRole ||
+		tempEnableTurnFocus.value !== settingStore.enableTurnFocus ||
+		tempChatRenderMode.value !== settingStore.chatRenderMode ||
 		tempGraphicQuality.value !== settingStore.graphicQuality ||
 		tempEnableShadow.value !== settingStore.enableShadow ||
 		tempEnableModelAnimation.value !== settingStore.enableModelAnimation ||
@@ -160,6 +179,15 @@ const applySettings = () => {
 		eventBus.emit("graphics:lockRole:change", { lockRole: tempLockRole.value });
 	}
 
+	if (tempEnableTurnFocus.value !== settingStore.enableTurnFocus) {
+		settingStore.enableTurnFocus = tempEnableTurnFocus.value;
+		eventBus.emit("graphics:turnFocus:change", { enable: tempEnableTurnFocus.value });
+	}
+
+	if (tempChatRenderMode.value !== settingStore.chatRenderMode) {
+		settingStore.chatRenderMode = tempChatRenderMode.value;
+	}
+
 	// 应用画质设置
 	if (tempGraphicQuality.value !== settingStore.graphicQuality) {
 		const quality = tempGraphicQuality.value;
@@ -190,8 +218,8 @@ const applySettings = () => {
 
 	// 应用模型动画设置
 	if (tempEnableModelAnimation.value !== settingStore.enableModelAnimation) {
-			settingStore.enableModelAnimation = tempEnableModelAnimation.value;
-			eventBus.emit("graphics:animation:change", { enable: tempEnableModelAnimation.value });
+		settingStore.enableModelAnimation = tempEnableModelAnimation.value;
+		eventBus.emit("graphics:animation:change", { enable: tempEnableModelAnimation.value });
 	}
 
 	// 应用音量设置
@@ -338,6 +366,74 @@ const applySettings = () => {
 					</div>
 				</div>
 
+				<div class="setting-item">
+					<div class="label">回合切换聚焦</div>
+					<div class="content">
+						<div>
+							<input
+								type="radio"
+								name="turn-focus-mode"
+								:value="true"
+								id="turn-focus-mode-true"
+								v-model="tempEnableTurnFocus"
+								hidden
+							/>
+							<label for="turn-focus-mode-true">
+								<FontAwesomeIcon icon="square-check" v-if="tempEnableTurnFocus" />
+								开启</label
+							>
+						</div>
+						<div>
+							<input
+								type="radio"
+								name="turn-focus-mode"
+								:value="false"
+								id="turn-focus-mode-false"
+								v-model="tempEnableTurnFocus"
+								hidden
+							/>
+							<label for="turn-focus-mode-false">
+								<FontAwesomeIcon icon="square-check" v-if="!tempEnableTurnFocus" />
+								关闭</label
+							>
+						</div>
+					</div>
+				</div>
+
+				<div class="setting-item">
+					<div class="label">发言显示</div>
+					<div class="content">
+						<div>
+							<input
+								type="radio"
+								name="chat-render-mode"
+								value="danmaku"
+								id="chat-render-mode-danmaku"
+								v-model="tempChatRenderMode"
+								hidden
+							/>
+							<label for="chat-render-mode-danmaku">
+								<FontAwesomeIcon icon="square-check" v-if="tempChatRenderMode === 'danmaku'" />
+								弹幕</label
+							>
+						</div>
+						<div>
+							<input
+								type="radio"
+								name="chat-render-mode"
+								value="bubble"
+								id="chat-render-mode-bubble"
+								v-model="tempChatRenderMode"
+								hidden
+							/>
+							<label for="chat-render-mode-bubble">
+								<FontAwesomeIcon icon="square-check" v-if="tempChatRenderMode === 'bubble'" />
+								对话框气泡</label
+							>
+						</div>
+					</div>
+				</div>
+
 				<!-- 画面质量设置 -->
 				<div class="setting-item">
 					<div class="label">画面质量</div>
@@ -461,10 +557,17 @@ const applySettings = () => {
 				<div class="setting-item">
 					<div class="label">日志</div>
 					<div class="content log-actions">
-						<button @click="logPanelVisible = true" class="log-button">查看日志</button>
-						<button v-if="win.platformAPI?.openLogsFolder" @click="openLogsFolder" class="log-button">
+						<button @click="logPanelVisible = true" class="btn-small log-button">查看日志</button>
+						<button v-if="win.platformAPI?.openLogsFolder" @click="openLogsFolder" class="btn-small log-button">
 							打开日志文件夹
 						</button>
+					</div>
+				</div>
+
+				<div class="setting-item">
+					<div class="label">AI</div>
+					<div class="content setting-link-content">
+						<button @click="openAISettings" class="btn-small setting-link-button">{{ aiEntryLabel }}</button>
 					</div>
 				</div>
 
@@ -497,6 +600,7 @@ const applySettings = () => {
 
 	<!-- 日志面板 -->
 	<LogPanel v-model:visible="logPanelVisible" />
+	<AiSettingPanel v-if="!hasStandaloneAIConsole" v-model:visible="aiSettingVisible" />
 </template>
 
 <style lang="scss" scoped>
@@ -565,22 +669,10 @@ const applySettings = () => {
 				// 日志按钮样式
 				&.log-actions {
 					gap: 0.5rem;
+					justify-content: center;
 
 					.log-button {
-						flex: 1;
-						background: var(--fp-color-secondary);
-						color: white;
-						border: none;
-						border-radius: 0.4rem;
-						padding: 0.5rem 0.8rem;
-						font-size: 0.9rem;
-						cursor: pointer;
-						transition: all 0.2s;
-
-						&:hover {
-							opacity: 0.9;
-							transform: translateY(-0.0625rem);
-						}
+						flex: 0 0 auto;
 					}
 				}
 
@@ -656,6 +748,14 @@ const applySettings = () => {
 						color: var(--fp-color-primary);
 						font-size: 1.1rem;
 						margin: 0 0.1rem;
+					}
+				}
+
+				&.setting-link-content {
+					justify-content: center;
+
+					.setting-link-button {
+						flex: 0 0 auto;
 					}
 				}
 			}

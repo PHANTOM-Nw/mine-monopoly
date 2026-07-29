@@ -3,7 +3,7 @@ import { MapItem, MapItemType } from "@mine-monopoly/types/interfaces/game/item"
 import { CameraMode, OperationMode } from "@src/enums";
 import mitt from "mitt";
 
-type Events = {
+export type Events = {
 	// 事件名: 事件参数类型
 	"change-model": string;
 

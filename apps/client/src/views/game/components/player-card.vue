@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { PlayerInfo } from "@mine-monopoly/types";
-import { PropType, computed, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
-import { __PROTOCOL__ } from "@src/../global.config";
 import { useGameData } from "@src/store/game";
 import UiRenderer from "@src/components/utils/ui-renderer/ui-renderer.vue";
 import gsap from "gsap";
@@ -43,9 +42,10 @@ watch(
 <template>
 	<div
 		class="player-card"
-		:class="{ is_bankrupted: _isBankrupted }"
-		:style="{ 'border-color': roundMark ? 'var(--fp-color-tertiary)' : '' }"
+		:class="{ is_bankrupted: _isBankrupted, round_mark: roundMark }"
 	>
+		<div v-if="roundMark" class="turn-badge">本回合</div>
+
 		<!-- <div :style="{ color: _userInfo.color }" class="card-num">
 			<FontAwesomeIcon icon="wand-sparkles" style="margin-right: 0.3rem" />{{ player.chanceCards.length }}
 		</div> -->
@@ -54,11 +54,9 @@ watch(
 			<div v-if="player.isOffline" class="disconnect-marker">
 				<FontAwesomeIcon icon="link-slash" />
 			</div>
-			<div v-if="player.isAI" class="ai-marker">
-				<FontAwesomeIcon icon="robot" />
-			</div>
 			<img v-if="avatarSrc" :src="avatarSrc" />
-			<FontAwesomeIcon v-else :style="{ color: _userInfo.color }" icon="gamepad" />
+			<FontAwesomeIcon v-else-if="player.isAI" class="avatar-icon" icon="robot" :style="{ color: _userInfo.color }" />
+			<FontAwesomeIcon v-else class="avatar-icon" :style="{ color: _userInfo.color }" icon="gamepad" />
 		</div>
 
 		<div class="info" :style="{ color: _userInfo.color }">
@@ -84,6 +82,7 @@ watch(
 	user-select: none;
 	margin: 0.2rem 0;
 	cursor: pointer;
+	position: relative;
 
 	&::before {
 		top: 0.3rem;
@@ -104,8 +103,28 @@ watch(
 		font-size: 1.1rem;
 	}
 
+	& > .turn-badge {
+		position: absolute;
+		top: -0.45rem;
+		right: 0.6rem;
+		z-index: 2;
+		padding: 0.18rem 0.55rem;
+		border-radius: 999px;
+		background-color: var(--fp-color-tertiary);
+		background-image: var(--fp-texture-felt);
+		color: #ffffff;
+		font-size: 0.75rem;
+		line-height: 1.2;
+		text-shadow: var(--fp-text-shadow-surround);
+		white-space: nowrap;
+	}
+
+	&.round_mark {
+		outline: 0.18rem solid var(--fp-color-tertiary);
+		outline-offset: 0;
+	}
+
 	&.is_bankrupted {
-		position: relative;
 		filter: grayscale(1);
 	}
 
@@ -132,8 +151,6 @@ watch(
 		width: $avatar_size;
 		height: $avatar_size;
 		font-size: 1.5rem;
-		line-height: 3rem;
-		text-align: center;
 		border-radius: 50%;
 		border: 0.2rem solid #ffffff;
 		overflow: hidden;
@@ -149,26 +166,24 @@ watch(
 			width: $avatar_size;
 			height: $avatar_size;
 			color: var(--fp-color-text-error);
-			background-color: rgba($color: #ffffff, $alpha: 0.5);
+			background-color: rgba($color: #ffffff, $alpha: 0.85);
 			position: absolute;
 			left: 0;
 			top: 0;
-		}
-
-		& > .ai-marker {
-			font-size: 1.5rem;
-			width: $avatar_size;
-			height: $avatar_size;
-			color: var(--fp-color-third, #6c5ce7);
-			background-color: rgba(255, 255, 255, 0.5);
-			position: absolute;
-			left: 0;
-			bottom: 0;
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			z-index: 1;
 		}
 
 		& > img {
 			width: $avatar_size;
 			height: $avatar_size;
+		}
+
+		& > .avatar-icon {
+			display: block;
+			line-height: 1;
 		}
 	}
 

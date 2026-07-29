@@ -6,15 +6,14 @@
 	import { FPMessageBox, UserCancelledError } from "@src/components/utils/fp-message-box";
 	import ItemSelector from "@src/components/utils/item-selector/item-selector.vue";
 	import router from "@src/router";
-	import { useLoading, useRoomInfo } from "@src/store";
-	import { useUserInfo } from "@src/store";
+	import { useLoading, useRoomInfo, useSettig, useUserInfo } from "@src/store";
 	import { getGameMapById, getGameMapList } from "@src/utils/api/map";
 	import { MonopolyClient, useMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
-	import { computed, onBeforeMount, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
+	import { computed, h, onBeforeMount, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
 	import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 	import { copyToClipboard, getDisplayValueByFormSchema } from "@src/utils";
 	import { setRoomPrivate } from "@src/utils/api/room-router";
-	import { FormSchema, GameMapInDb, GameSetting, RoleInRoom } from "@mine-monopoly/types";
+	import { FormSchema, GameMapInDb, GameSetting, RoleInRoom, UserInRoomInfo } from "@mine-monopoly/types";
 	import { loadGameMapFromServer } from "@src/utils/file/game-map";
 	import RolePreviewer from "./components/role-previewer.vue";
 	import { useResourceStore, useMapData } from "@src/store/game";
@@ -33,14 +32,34 @@ import { vStagger } from "@src/directives";
 
 	const roomInfoStore = useRoomInfo();
 	const userInfoStore = useUserInfo();
+	const maxRoomPlayers = 6;
 
-	const playerList = computed(() => roomInfoStore.userList);
+	const playerList = computed(() => roomInfoStore.userList.filter((user) => !user.isSpectator));
+	const spectatorList = computed(() => roomInfoStore.userList.filter((user) => user.isSpectator));
+	const roomSlots = computed(() => {
+		const slots: Array<
+			| { type: "player"; user: UserInRoomInfo }
+			| { type: "add-ai" }
+			| { type: "empty"; key: string }
+		> = playerList.value.map((user) => ({ type: "player", user }));
+		const emptyCount = Math.max(0, maxRoomPlayers - slots.length);
+		for (let i = 0; i < emptyCount; i++) {
+			const isFirstEmpty = i === 0;
+			if (isFirstEmpty && canAddAIPlayer.value) {
+				slots.push({ type: "add-ai" });
+				continue;
+			}
+			slots.push({ type: "empty", key: `empty-${i}` });
+		}
+		return slots;
+	});
 	const ownerName = computed(() => roomInfoStore.ownerName);
 	const ownerId = computed(() => roomInfoStore.ownerId);
 	const roomId = computed(() => roomInfoStore.roomId);
 	const isPrivate = ref(true);
 
 	const isOwner = computed(() => userInfoStore.userId === roomInfoStore.ownerId);
+	const amISpectator = computed(() => roomInfoStore.amISpectator);
 	const isReady = computed(() => roomInfoStore.userList.find((user) => user.userId === userInfoStore.userId)?.isReady);
 
 	const saveManager = new SaveManager();
@@ -80,16 +99,24 @@ import { vStagger } from "@src/directives";
 	const roleList = computed(() => roomInfoStore.roleList);
 	const roleSelectorVisible = ref(false);
 	const tempRoleSelectedId = ref<string[]>([]);
+	const roleTargetUserId = ref<string>("");
 
-	function handleSelectRole() {
-		const currentUser = roomInfoStore.userList.find((user) => user.userId === userInfoStore.userId);
+	function handleSelectRole(targetUser?: UserInRoomInfo) {
+		const currentUser = targetUser ?? roomInfoStore.userList.find((user) => user.userId === userInfoStore.userId);
+		if (!currentUser) return;
+		roleTargetUserId.value = currentUser.userId;
 		tempRoleSelectedId.value = currentUser?.roleId ? [currentUser.roleId] : [];
 		roleSelectorVisible.value = true;
 	}
 
 	function handleChangeRole() {
 		if (socketClient && tempRoleSelectedId.value.length > 0 && tempRoleSelectedId.value[0] !== undefined) {
-			socketClient.changeRole(tempRoleSelectedId.value[0]);
+			const result = socketClient.changeRoleForUser(roleTargetUserId.value || userInfoStore.userId, tempRoleSelectedId.value[0]);
+			if (!result.success) {
+				FPMessage({ type: "error", message: result.error || "修改角色失败" });
+				return;
+			}
+			roleSelectorVisible.value = false;
 		}
 	}
 
@@ -125,10 +152,13 @@ import { vStagger } from "@src/directives";
 		() =>
 			!(
 				Boolean(roomInfoStore.mapInfo) &&
-				roomInfoStore.userList.every((user) => Boolean(user.roleId) || user.userId === ownerId.value || user.isReady) &&
+				roomInfoStore.userList.every(
+					(user) => Boolean(user.roleId) || Boolean(user.isAI) || user.userId === ownerId.value || user.isReady,
+				) &&
 				!useLoading().loading
 			),
 	);
+	const canAddAIPlayer = computed(() => isOwner.value && playerList.value.length < maxRoomPlayers && !roomInfoStore.isStarted);
 
 	async function handleSetPrivate() {
 		isPrivate.value = !isPrivate.value;
@@ -158,6 +188,60 @@ import { vStagger } from "@src/directives";
 	function handleGameStart() {
 		if (socketClient) {
 			socketClient.startGame();
+		}
+	}
+
+	function isAnyLLMConfigured(): boolean {
+		const config = useSettig().aiDecisionConfig;
+		if (config.remote?.baseUrl && config.remote?.apiKey && config.remote?.model) {
+			return true;
+		}
+		if (config.remoteProfiles?.some((p) => p.baseUrl && p.apiKey && p.model)) {
+			return true;
+		}
+		return false;
+	}
+
+	async function handleAddAIPlayer() {
+		if (!socketClient) return;
+
+		if (!isAnyLLMConfigured()) {
+			try {
+				await FPMessageBox({
+					title: "提示",
+					content: h("div", { style: "line-height: 1.6;" }, [
+						"检测到未配置远程LLM（大语言模型），AI玩家将无法进行智能决策，只能执行简单的拒绝操作。",
+						h("br"),
+						"如需完整体验，请前往「AI设置」配置LLM。",
+						h("br"),
+						h(
+							"a",
+							{
+								href: "https://www.bilibili.com/video/BV1QhKr69EZ2",
+								target: "_blank",
+								style: "color: var(--fp-color-secondary); text-decoration: underline;",
+							},
+							"前往B站查看教程",
+						),
+					]),
+					confirmText: "知道了",
+				});
+			} catch {
+				// 用户关闭弹窗也继续添加
+			}
+		}
+
+		const result = socketClient.addAIPlayer();
+		if (!result.success) {
+			FPMessage({ type: "error", message: result.error || "添加 AI 玩家失败" });
+		}
+	}
+
+	function handleToggleSpectatorMode() {
+		if (!socketClient) return;
+		const result = socketClient.setSpectatorMode(!amISpectator.value);
+		if (!result.success) {
+			FPMessage({ type: "error", message: result.error || "切换旁观模式失败" });
 		}
 	}
 
@@ -229,9 +313,7 @@ import { vStagger } from "@src/directives";
 		if (!socketClient) return;
 		//传输需要将地图从ArrayBuffer编码为Base64字符串
 		const mapData = { from: "custom" as const, data: arrayBufferToBase64(file) };
-		console.log("[ChangeMap] 1.room.vue: 准备发送自定义地图, dataLen=", mapData.data.length);
 		socketClient.changeGameMap(mapData);
-		console.log("[ChangeMap] 2.room.vue: changeGameMap 调用完成, 显示loading");
 		useLoading().showLoading("等待其他玩家确认");
 	}
 </script>
@@ -304,9 +386,11 @@ import { vStagger } from "@src/directives";
 								{{ currentMap ? "开始游戏" : "先选择地图吧" }}
 							</button>
 						</div>
-						<button v-else :disabled="canStart" class="ready-button" @click="handleGameStart">
-							{{ currentMap ? "开始游戏" : "先选择地图吧" }}
-						</button>
+						<div v-else class="footbar-row">
+							<button :disabled="canStart" class="ready-button footbar-btn-start" @click="handleGameStart">
+								{{ currentMap ? "开始游戏" : "先选择地图吧" }}
+							</button>
+						</div>
 					</template>
 					<button v-else class="ready-button" @click="handleReadyToggle">
 						{{ isReady ? "取消准备" : "准备" }}
@@ -316,14 +400,26 @@ import { vStagger } from "@src/directives";
 			</div>
 
 			<div class="right-container">
+				<div v-if="spectatorList.length > 0" class="spectator-list">
+					<span class="spectator-list-label">旁观者</span>
+					<span v-for="user in spectatorList" :key="user.userId" class="spectator-user">
+						{{ user.username }}
+					</span>
+					<button v-if="amISpectator" type="button" class="spectator-exit-button btn-small" @click="handleToggleSpectatorMode">
+						退出旁观
+					</button>
+				</div>
 				<div class="player-list-container" v-stagger="350">
-					<room-user-card
-						@role-select="handleSelectRole"
-						v-for="player in playerList"
-						:key="player.userId"
-						:user="player"
-					/>
-					<roomUserCard v-for="i in Math.max(0, 6 - playerList.length)" :key="i" :user="undefined" />
+					<template v-for="slot in roomSlots" :key="slot.type === 'player' ? slot.user.userId : slot.type === 'empty' ? slot.key : 'add-ai'">
+						<room-user-card
+							v-if="slot.type === 'player'"
+							@role-select="handleSelectRole"
+							@spectator-toggle="handleToggleSpectatorMode"
+							:user="slot.user"
+						/>
+						<roomUserCard v-else-if="slot.type === 'add-ai'" :user="undefined" :add-ai-button="true" @add-ai="handleAddAIPlayer" />
+						<roomUserCard v-else :user="undefined" />
+					</template>
 				</div>
 			</div>
 		</div>
@@ -456,6 +552,50 @@ import { vStagger } from "@src/directives";
 		display: flex;
 		flex-direction: column;
 
+		& > .spectator-list {
+			display: flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 0.45rem;
+			margin-bottom: 0.6rem;
+			padding: 0.75rem 0.9rem;
+			border-radius: 0.7rem;
+			box-shadow: var(--fp-shadow-md);
+			@include felt-patch(#ffe6a8);
+
+			.spectator-list-label,
+			.spectator-user {
+				background-image: var(--fp-texture-felt);
+			}
+
+			& .spectator-list-label {
+				display: inline-flex;
+				align-items: center;
+				padding: 0.42rem 0.72rem;
+				border-radius: 0.65rem;
+				background-color: var(--fp-color-secondary);
+				color: #ffffff;
+				font-size: 0.88rem;
+				letter-spacing: 0.04em;
+			}
+
+			& .spectator-user {
+				display: inline-flex;
+				align-items: center;
+				padding: 0.38rem 0.68rem;
+				border-radius: 999px;
+				background-color: rgba(255, 255, 255, 0.94);
+				color: var(--fp-color-text);
+				font-size: 0.84rem;
+				font-weight: 600;
+			}
+
+			& .spectator-exit-button {
+				margin-left: auto;
+				flex-shrink: 0;
+			}
+		}
+
 		& > .player-list-container {
 			flex: 1;
 			display: grid;
@@ -466,6 +606,7 @@ import { vStagger } from "@src/directives";
 		}
 	}
 }
+
 
 .room-topbar {
 	position: absolute;
@@ -603,14 +744,11 @@ import { vStagger } from "@src/directives";
 
 		.tips {
 			width: max-content;
-			margin-top: 4rem;
 			font-size: 0.8rem;
-			background-color: rgba(255, 255, 255, 0.7);
 			border-radius: 0.7rem;
-			padding: 0.6rem;
+			padding: 0.2rem;
 			color: var(--fp-color-primary);
 			text-shadow: var(--fp-text-shadow);
-			margin-bottom: 0.3rem;
 		}
 	}
 
