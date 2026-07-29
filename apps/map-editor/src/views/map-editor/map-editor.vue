@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { MapRenderer } from "@src/core/renderer/map-renderer";
 import { useEditorStore } from "@src/stores";
-import { computed, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted } from "vue";
 import TopToolBar from "./components/ui/top-tool-bar.vue";
 import EditModeUi from "./components/ui/edit-mode.vue";
 import SelectModeUi from "./components/ui/select-mode.vue";
 import { OperationMode } from "@src/enums";
 
 const editorStore = useEditorStore();
+let mapRenderer: MapRenderer | null = null;
 
 onMounted(() => {
 	const canvasEl = document.querySelector("#map-editor-canvas-container") as HTMLCanvasElement;
-	const mapRenderer = new MapRenderer(canvasEl);
+	mapRenderer = new MapRenderer(canvasEl);
+});
+
+onBeforeUnmount(() => {
+	mapRenderer?.destroy();
+	mapRenderer = null;
 });
 
 const modeUiMap: Record<OperationMode, any> = {

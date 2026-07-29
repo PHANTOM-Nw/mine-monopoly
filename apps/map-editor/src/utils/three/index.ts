@@ -28,18 +28,22 @@ export async function getModelByUrl(url: string): Promise<LoadedGLTF> {
 }
 
 export function applyOpacityToObject(object: THREE.Object3D, opacity: number): void {
-	// 检查是否为Mesh对象，因为只有Mesh对象才能应用材质
-	if (object instanceof THREE.Mesh) {
-		// 创建透明材质
-		const transparentMaterial = new THREE.MeshPhongMaterial({
-			color: object.material.color,
-			transparent: true,
-			opacity: opacity,
-		});
+	object.traverse((child) => {
+		if (!(child instanceof THREE.Mesh)) return;
 
-		// 将透明材质应用到Object3D对象
-		object.material = transparentMaterial;
-	}
+		child.geometry = child.geometry.clone();
+		const cloneMaterial = (material: THREE.Material) => {
+			const transparentMaterial = material.clone();
+			transparentMaterial.transparent = true;
+			transparentMaterial.opacity = opacity;
+			transparentMaterial.depthWrite = false;
+			return transparentMaterial;
+		};
+
+		child.material = Array.isArray(child.material)
+			? child.material.map(cloneMaterial)
+			: cloneMaterial(child.material);
+	});
 }
 
 interface DynamicLineOptions {

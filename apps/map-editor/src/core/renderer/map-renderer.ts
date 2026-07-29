@@ -2,7 +2,7 @@ import { GameMap } from "@mine-monopoly/types";
 import { debounce, ThreeSceneBase, AnimationManager } from "@mine-monopoly/utils";
 import { CameraMode, OperationMode } from "@src/enums";
 import { useEditorStore, useMapDataStore, useResourceStore } from "@src/stores";
-import { eventBus } from "@src/utils/event-bus";
+import { eventBus, type Events } from "@src/utils/event-bus";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
 import { LoopRepeat, Clock } from "three";
@@ -63,14 +63,26 @@ export class MapRenderer {
 	private justCompletedBoxSelect: boolean = false;
 	private gridHelper: THREE.GridHelper;
 	private axesHelper: THREE.AxesHelper;
+	private previewRequestId = 0;
+	private readonly eventBusCleanups: Array<() => void> = [];
+	private readonly onMouseMove = (event: MouseEvent) => this.handleMouseMove(event);
+	private readonly onMouseDown = (event: MouseEvent) => this.handleMouseDown(event);
+	private readonly onMouseUp = (event: MouseEvent) => this.handleMouseUp(event);
+	private readonly onMouseClick = (event: MouseEvent) => this.handleMouseClick(event);
+	private readonly onKeyDown = (event: KeyboardEvent) => this.handleKeyPress(event);
+	private readonly onWindowResize = () => this.handleResize();
+	private readonly onContainerResize = () => this.handleResize();
+	private readonly onFullscreenChange = () => requestAnimationFrame(() => this.handleResize());
 
 	constructor(canvasEl: HTMLCanvasElement) {
 		this.renderer = new THREE.WebGLRenderer({ canvas: canvasEl, preserveDrawingBuffer: true });
 		this.canvasEl = canvasEl;
+		this.canvasEl.style.width = "100%";
+		this.canvasEl.style.height = "100%";
 		this.scene = new THREE.Scene();
 		this.camera = new THREE.PerspectiveCamera(75, this.canvasEl.clientWidth / this.canvasEl.clientHeight, 0.1, 100);
 		// this.renderLoop();
-		this.renderer.setSize(this.canvasEl.clientWidth, this.canvasEl.clientHeight);
+		this.renderer.setSize(this.canvasEl.clientWidth, this.canvasEl.clientHeight, false);
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 		this.scene.background = new THREE.Color(0xbbbbbb);
@@ -156,16 +168,11 @@ export class MapRenderer {
 		// 初始化框选器
 		this.boxSelector = new BoxSelector(canvasEl, this.scene);
 
-		window.addEventListener("resize", () => {
-			const w = canvasEl.clientWidth;
-			const h = canvasEl.clientHeight;
-			(this.camera as THREE.PerspectiveCamera).aspect = w / h;
-			(this.camera as THREE.PerspectiveCamera).updateProjectionMatrix();
-			this.renderer.setSize(w, h);
-			this.composer.setSize(w, h);
-			this.outlinePass.setSize(w, h); // 避免 framebuffer zero size
-			this.multiSelectOutlinePass.setSize(w, h); // 更新框选高亮 Pass
-		});
+		window.addEventListener("resize", this.onWindowResize);
+		document.addEventListener("fullscreenchange", this.onFullscreenChange);
+		this.resizeObserver = new ResizeObserver(this.onContainerResize);
+		this.resizeObserver.observe(this.canvasEl.parentElement ?? this.canvasEl);
+		this.handleResize();
 		this.initEventListeners();
 		eventBus.emit("renderer-ready");
 
@@ -242,15 +249,15 @@ export class MapRenderer {
 	}
 
 	private initEventListeners() {
-		eventBus.on("map-loaded", async (mapData) => {
+		this.onEvent("map-loaded", async (mapData) => {
 			await this.loadMap(mapData);
 		});
 
-		eventBus.on("map-background-update", () => {
+		this.onEvent("map-background-update", () => {
 			this.loadMapBackground();
 		});
 
-		eventBus.on("change-operation-mode", (newMode) => {
+		this.onEvent("change-operation-mode", (newMode) => {
 			switch (newMode) {
 				case OperationMode.Edit:
 					this.outlinePass.selectedObjects = [];
@@ -266,11 +273,11 @@ export class MapRenderer {
 			useEditorStore().isLinkMode = false;
 		});
 
-		eventBus.on("change-camera-mode", (newMode) => {
+		this.onEvent("change-camera-mode", (newMode) => {
 			this.switchCameraMode(newMode);
 		});
 
-		eventBus.on("change-link-mode", (isLinkMode) => {
+		this.onEvent("change-link-mode", (isLinkMode) => {
 			if (!isLinkMode) {
 				this.outlinePass.selectedObjects = [];
 				this.linkOutlinePass.selectedObjects = [];
@@ -278,39 +285,39 @@ export class MapRenderer {
 			}
 		});
 
-		eventBus.on("map-item-link", (id) => {
+		this.onEvent("map-item-link", (id) => {
 			this.handleMapItemLink(id);
 		});
 
-		eventBus.on("map-item-unlink", (id) => {
+		this.onEvent("map-item-unlink", (id) => {
 			this.handleMapItemUnLink(id);
 		});
 
-		eventBus.on("map-event-link", (id) => {
+		this.onEvent("map-event-link", (id) => {
 			this.handleMapEventLink(id);
 		});
 
-		eventBus.on("map-event-unlink", (id) => {
+		this.onEvent("map-event-unlink", (id) => {
 			this.handleMapEventUnLink(id);
 		});
 
-		eventBus.on("map-index-update", (indexList) => {
+		this.onEvent("map-index-update", (indexList) => {
 			this.updateMapIndex([...indexList]);
 		});
 
-		eventBus.on("map-item-type-selected", (itemTypeId) => {
+		this.onEvent("map-item-type-selected", (itemTypeId) => {
 			this.updatePreviewBox(itemTypeId);
 		});
 
-		eventBus.on("map-item-deleted", (mapItemId) => {
+		this.onEvent("map-item-deleted", (mapItemId) => {
 			this.removeMapItem(mapItemId);
 		});
 
-		eventBus.on("toggle-box-select-mode", () => {
+		this.onEvent("toggle-box-select-mode", () => {
 			this.handleBoxSelectModeToggle();
 		});
 
-		eventBus.on("toggle-indicators", () => {
+		this.onEvent("toggle-indicators", () => {
 			const visible = !this.gridHelper.visible;
 			this.gridHelper.visible = visible;
 			this.axesHelper.visible = visible;
@@ -319,43 +326,43 @@ export class MapRenderer {
 			this.linkHelperLine.line.visible = visible;
 		});
 
-		eventBus.on("map-item-updated", (id: string) => {
+		this.onEvent("map-item-updated", (id: string) => {
 			this.handleMapItemUpdated(id);
 		});
 
-		eventBus.on("batch-move-map-items", (data: { ids: string[], deltaX: number, deltaY: number }) => {
+		this.onEvent("batch-move-map-items", (data: { ids: string[], deltaX: number, deltaY: number }) => {
 			console.log('[渲染器] 收到批量移动事件:', data);
 			this.handleBatchMoveMapItems(data.ids, data.deltaX, data.deltaY);
 		});
 
-		eventBus.on("batch-delete-map-items", async (ids: string[]) => {
+		this.onEvent("batch-delete-map-items", async (ids: string[]) => {
 			console.log('[渲染器] 收到批量删除事件:', ids);
 			await this.handleBatchDeleteMapItems(ids);
 		});
 
-			eventBus.on("batch-rotate-map-items", async (data: { ids: string[], direction: 1 | -1 }) => {
+			this.onEvent("batch-rotate-map-items", async (data: { ids: string[], direction: 1 | -1 }) => {
 				console.log('[渲染器] 收到批量旋转事件:', data);
 				await this.handleBatchRotateMapItems(data.ids, data.direction);
 			});
 
-		eventBus.on("batch-select-all", () => {
+		this.onEvent("batch-select-all", () => {
 			console.log('[渲染器] 收到全选事件');
 			this.handleBatchSelectAll();
 		});
 
-		eventBus.on("clear-selection", () => {
+		this.onEvent("clear-selection", () => {
 			console.log('[渲染器] 收到清空选择事件');
 			this.clearMultiSelect();
 		});
 
-		eventBus.on("undo-delete", async () => {
+		this.onEvent("undo-delete", async () => {
 			console.log('[渲染器] 收到撤销删除事件');
 			await this.handleUndoDelete();
 		});
 
 		console.log('[渲染器初始化] 批量操作事件监听器已设置完成');
 
-		eventBus.on("change-model", async (modelId: string) => {
+		this.onEvent("change-model", async (modelId: string) => {
 			await this.handleModelChanged(modelId);
 		});
 
@@ -364,14 +371,43 @@ export class MapRenderer {
 	}
 
 	private initMouseListener() {
-		this.canvasEl.addEventListener("mousemove", this.handleMouseMove.bind(this));
-		this.canvasEl.addEventListener("mousedown", this.handleMouseDown.bind(this));
-		this.canvasEl.addEventListener("mouseup", this.handleMouseUp.bind(this));
-		this.canvasEl.addEventListener("click", this.handleMouseClick.bind(this));
+		this.canvasEl.addEventListener("mousemove", this.onMouseMove);
+		this.canvasEl.addEventListener("mousedown", this.onMouseDown);
+		this.canvasEl.addEventListener("mouseup", this.onMouseUp);
+		this.canvasEl.addEventListener("click", this.onMouseClick);
 	}
 
 	private initKeyBoardListener() {
-		document.addEventListener("keydown", this.handleKeyPress.bind(this));
+		document.addEventListener("keydown", this.onKeyDown);
+	}
+
+	private onEvent<Key extends keyof Events>(event: Key, handler: (payload: Events[Key]) => void) {
+		eventBus.on(event, handler);
+		this.eventBusCleanups.push(() => eventBus.off(event, handler));
+	}
+
+	private handleResize() {
+		const parent = this.canvasEl.parentElement;
+		this.canvasEl.style.width = "100%";
+		this.canvasEl.style.height = "100%";
+		const width = parent?.clientWidth || this.canvasEl.clientWidth;
+		const height = parent?.clientHeight || this.canvasEl.clientHeight;
+		if (width === 0 || height === 0) return;
+
+		if (this.camera instanceof THREE.PerspectiveCamera) {
+			this.camera.aspect = width / height;
+		} else if (this.camera instanceof THREE.OrthographicCamera) {
+			const frustumHeight = this.camera.top - this.camera.bottom;
+			const halfWidth = (frustumHeight * width) / height / 2;
+			this.camera.left = -halfWidth;
+			this.camera.right = halfWidth;
+		}
+		(this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera).updateProjectionMatrix();
+		this.renderer.setSize(width, height, false);
+		this.composer.setSize(width, height);
+		this.outlinePass.setSize(width, height);
+		this.linkOutlinePass.setSize(width, height);
+		this.multiSelectOutlinePass.setSize(width, height);
 	}
 
 	private handleMouseMove(event: MouseEvent) {
@@ -1513,17 +1549,50 @@ export class MapRenderer {
 	}
 
 	private async updatePreviewBox(itemTypeId?: string) {
-		if (this.previewBoxInCreate) this.scene.remove(this.previewBoxInCreate);
+		const requestId = ++this.previewRequestId;
+		this.clearPreviewBox();
 		if (!itemTypeId) return;
 		const itemType = useMapDataStore().findMapItemTypeById(itemTypeId);
-		if (itemType) {
+		if (!itemType) return;
+
+		try {
 			const gltf = await getModelById(itemType.modelId);
-			if (!gltf) return;
-			const newPreModel = gltf.scene;
-			applyOpacityToObject(newPreModel, 0.5);
-			this.previewBoxInCreate = newPreModel;
-			this.scene.add(newPreModel);
+			const newPreviewModel = gltf.scene.clone(true);
+			applyOpacityToObject(newPreviewModel, 0.5);
+
+			const editorStore = useEditorStore();
+			const shouldDiscard =
+				requestId !== this.previewRequestId ||
+				editorStore.currentEditMode !== OperationMode.Edit ||
+				editorStore.currentMapItemTypeId !== itemTypeId;
+			if (shouldDiscard) {
+				this.disposePreviewBox(newPreviewModel);
+				return;
+			}
+
+			this.previewBoxInCreate = newPreviewModel;
+			this.scene.add(newPreviewModel);
+		} catch (error) {
+			if (requestId === this.previewRequestId) {
+				console.error("[地图编辑器] 预览模型加载失败:", error);
+			}
 		}
+	}
+
+	private clearPreviewBox() {
+		if (!this.previewBoxInCreate) return;
+		this.scene.remove(this.previewBoxInCreate);
+		this.disposePreviewBox(this.previewBoxInCreate);
+		this.previewBoxInCreate = undefined;
+	}
+
+	private disposePreviewBox(object: THREE.Object3D) {
+		object.traverse((child) => {
+			if (!(child instanceof THREE.Mesh)) return;
+			child.geometry.dispose();
+			if (Array.isArray(child.material)) child.material.forEach((material) => material.dispose());
+			else child.material.dispose();
+		});
 	}
 
 	private addLinkLine(mapItem: MapItem) {
@@ -1697,6 +1766,17 @@ export class MapRenderer {
 	}
 
 	public destroy(): void {
+		++this.previewRequestId;
+		this.clearPreviewBox();
+		this.eventBusCleanups.splice(0).forEach((cleanup) => cleanup());
+		window.removeEventListener("resize", this.onWindowResize);
+		document.removeEventListener("fullscreenchange", this.onFullscreenChange);
+		this.canvasEl.removeEventListener("mousemove", this.onMouseMove);
+		this.canvasEl.removeEventListener("mousedown", this.onMouseDown);
+		this.canvasEl.removeEventListener("mouseup", this.onMouseUp);
+		this.canvasEl.removeEventListener("click", this.onMouseClick);
+		document.removeEventListener("keydown", this.onKeyDown);
+
 		// 释放动画管理器
 		this.animationManager?.dispose();
 
@@ -1718,12 +1798,6 @@ export class MapRenderer {
 			const e = gl.getExtension("WEBGL_lose_context");
 			e && e.loseContext();
 		}
-		this.canvasEl.removeEventListener("mousemove", this.handleMouseMove);
-		this.canvasEl.removeEventListener("mousedown", this.handleMouseDown);
-		this.canvasEl.removeEventListener("mouseup", this.handleMouseUp);
-		this.canvasEl.removeEventListener("click", this.handleMouseClick);
-		document.removeEventListener("keydown", this.handleKeyPress);
-
 		// 清理框选高亮 Pass
 		this.composer.removePass(this.multiSelectOutlinePass);
 		this.multiSelectOutlinePass.dispose();
