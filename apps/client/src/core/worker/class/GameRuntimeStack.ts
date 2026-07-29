@@ -13,6 +13,12 @@ export class GameRuntimeStack implements IGameRuntimeStack<GameContext> {
 			const gameEvent = this.stack.pop();
 			if (!gameEvent) break;
 			await gameEvent.fn(context, gameProcess);
+
+			const currentRoundPlayer = (context as { currentRoundPlayer?: { isBankrupted?: boolean } })
+				.currentRoundPlayer;
+			if (currentRoundPlayer?.isBankrupted) {
+				this.clear();
+			}
 		}
 		this.isRunning = false;
 	}
@@ -27,5 +33,9 @@ export class GameRuntimeStack implements IGameRuntimeStack<GameContext> {
 
 	push(...gameEvents: GameEvent<GameContext>[]): void {
 		this.stack.push(...gameEvents);
+	}
+
+	clear(): void {
+		this.stack = [];
 	}
 }

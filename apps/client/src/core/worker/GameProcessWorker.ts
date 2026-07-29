@@ -294,7 +294,7 @@ async function handleSetMoney(
 
 	switch (operation) {
 		case "set":
-			player.setMoney(amount);
+			await player.setMoney(amount);
 			break;
 		case "add":
 			await player.gain(amount);
@@ -1624,6 +1624,7 @@ export class GameProcess implements IGameProcess {
 				this.mapData.extraLibs,
 			);
 			player.isAI = Boolean(u.isAI);
+			player.setBankruptcyHandler((bankruptedPlayer) => this.releaseBankruptedPlayerAssets(bankruptedPlayer));
 			player.setPositionIndex(0);
 			this.players.set(player.id, player);
 
@@ -1880,6 +1881,18 @@ export class GameProcess implements IGameProcess {
 		}
 	}
 
+	private async releaseBankruptedPlayerAssets(player: Player) {
+		const properties = [...player.properties];
+		for (const property of properties) {
+			await property.setOwner(undefined);
+			await property.setLevel(0);
+		}
+		player.chanceCards = [];
+		player.isStop = 0;
+		player.stop = 0;
+		this.gameDataBroadcast();
+	}
+
 	private async gameLoop() {
 		this.gameDataBroadcast();
 		//游戏循环
@@ -1927,8 +1940,14 @@ export class GameProcess implements IGameProcess {
 						() => this.runGamePhase(phase, context),
 						`${player.name} 回合阶段: ${phase.name}`,
 					);
+					if (player.isBankrupted) break;
 				}
 				this.currentRoundPlayer = null;
+				if (player.isBankrupted) {
+					await this.checkGameOver();
+					if (this.isGameOver) break;
+					continue;
+				}
 				await player.commandBus.execute({ type: "player.round.end", payload: { player } });
 			}
 

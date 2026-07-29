@@ -56,6 +56,7 @@ export class Player implements IPlayer {
 
 	private user: UserInRoomInfo;
 	private roleInitFunction: (player: IPlayer, gameProcess: IGameProcess) => void;
+	private bankruptcyHandler?: (player: Player) => Promise<void>;
 
 	constructor(
 		user: UserInRoomInfo,
@@ -175,13 +176,13 @@ export class Player implements IPlayer {
 			return payload;
 		});
 
-		this.commandBus.setHandler("player.money.lose", (payload) => {
+		this.commandBus.setHandler("player.money.lose", async (payload) => {
 			const { money } = payload;
 			const moneyToLose = money > 0 ? money : 0;
 			const success = this.money >= moneyToLose;
 			const actualCost = success ? moneyToLose : this.money;
 			this.money -= actualCost;
-			if (this.money <= 0) this.setBankrupted(true);
+			if (this.money <= 0) await this.markBankrupted();
 			return {
 				...payload,
 				success,
@@ -196,9 +197,13 @@ export class Player implements IPlayer {
 			return payload;
 		});
 
-		this.commandBus.setHandler("player.bankrupted.set", (payload) => {
+		this.commandBus.setHandler("player.bankrupted.set", async (payload) => {
 			const { bankrupted } = payload;
-			this.isBankrupted = bankrupted;
+			if (bankrupted) {
+				await this.markBankrupted();
+			} else {
+				this.isBankrupted = false;
+			}
 			return payload;
 		});
 
@@ -238,7 +243,11 @@ export class Player implements IPlayer {
 
 	public async setMoney(money: number) {
 		this.money = money;
-		if (this.money <= 0) this.setBankrupted(true);
+		if (this.money <= 0) await this.markBankrupted();
+	}
+
+	public setBankruptcyHandler(handler: (player: Player) => Promise<void>) {
+		this.bankruptcyHandler = handler;
 	}
 
 	public async setStop(stop: number) {
@@ -250,7 +259,19 @@ export class Player implements IPlayer {
 	}
 
 	public setBankrupted(isBankrupted: boolean) {
+		const becameBankrupted = isBankrupted && !this.isBankrupted;
 		this.isBankrupted = isBankrupted;
+		if (becameBankrupted) {
+			void this.bankruptcyHandler?.(this).catch((error) => {
+				console.error(`玩家 ${this.name} 破产清算失败:`, error);
+			});
+		}
+	}
+
+	private async markBankrupted() {
+		if (this.isBankrupted) return;
+		this.isBankrupted = true;
+		await this.bankruptcyHandler?.(this);
 	}
 
 	public getBuff(): Buff[] {

@@ -549,10 +549,10 @@ export class GameRenderer {
 	}
 
 	private async initPlayer() {
-		const playersList = useGameData().players;
+		const playersList = useGameData().players.filter((player) => !player.isBankrupted);
 		await this.loadPlayersModules(playersList);
-		playersList.forEach((p) => {
-			this.updatePlayerPosition(p);
+		playersList.forEach((player) => {
+			this.updatePlayerPosition(player);
 		});
 	}
 
@@ -1324,6 +1324,11 @@ export class GameRenderer {
 			const moneyDiff = newMoney - oldMoney;
 			this.spawnMoneyParticleOnPlayer(playerId, moneyDiff);
 		});
+		useEventBus().on("player-isBankrupted", (playerId: string, oldValue: boolean, newValue: boolean) => {
+			if (!oldValue && newValue) {
+				this.removePlayerEntity(playerId);
+			}
+		});
 		for (const key of ["level", "owner", "costList"]) {
 			useEventBus().on(`property-${key}`, async (propertyId: string) => {
 				this.updateBuilding(useGameData().getPropertyById(propertyId)!);
@@ -1905,6 +1910,22 @@ export class GameRenderer {
 
 		// 4. 重新初始化建筑
 		await this.initProperties();
+	}
+
+	private removePlayerEntity(playerId: string) {
+		const playerEntity = this.playerEntities.get(playerId);
+		if (!playerEntity) return;
+
+		this.clearSpeechBubble(playerId);
+		this.clearThinkingMarker(playerId);
+		this.playerPendingWalks.delete(playerId);
+		this.playerPosition.delete(playerId);
+		if (this.currentFocusModule === playerEntity.model) {
+			this.currentFocusModule = null;
+			this.isLockingRole = false;
+		}
+		this.scene.remove(playerEntity.model);
+		this.playerEntities.delete(playerId);
 	}
 
 	private updatePlayerPosition(playerInfo: PlayerInfo) {
