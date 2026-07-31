@@ -27,15 +27,19 @@ export class MonopolyHost {
 	private connectionVersionMap: Map<string, number> = new Map();
 
 	private destoryHandler: Function | undefined;
+	private hostLeaseToken: string;
 
-	private constructor(peer: Peer, room: Room, heartContinuationTimeMs: number) {
+	private constructor(peer: Peer, room: Room, heartContinuationTimeMs: number, hostLeaseToken: string) {
 		this.peer = peer;
 		this.room = room;
+		this.hostLeaseToken = hostLeaseToken;
 
 		this.init(this.peer);
 
 		const heartInterval = setInterval(() => {
-			emitRoomHeart(this.room.getRoomId());
+			void emitRoomHeart(this.room.getRoomId(), this.hostLeaseToken).catch((error) => {
+				console.warn("[MonopolyHost] 房主租约心跳失败", error);
+			});
 		}, heartContinuationTimeMs);
 		this.intervalList.push(heartInterval);
 
@@ -221,7 +225,7 @@ export class MonopolyHost {
 		});
 	}
 
-	public static async create(roomId: string, host: string, port: number, heartContinuationTimeMs: number, iceServers: RTCIceServer[]) {
+	public static async create(roomId: string, host: string, port: number, heartContinuationTimeMs: number, iceServers: RTCIceServer[], registration: { hostLeaseToken: string; hostEpoch: number }) {
 		const peer = await new Promise<Peer>((resolve) => {
 			const peerOptions = __ICE_USE_PREFIX__
 				? {
@@ -252,7 +256,7 @@ export class MonopolyHost {
 		});
 		const room = new Room(roomId);
 
-		return new MonopolyHost(peer, room, heartContinuationTimeMs);
+		return new MonopolyHost(peer, room, heartContinuationTimeMs, registration.hostLeaseToken);
 	}
 
 	public broadcast(msg: string) {
@@ -286,7 +290,8 @@ export class MonopolyHost {
 	}
 
 	public destory() {
-		deleteRoom(this.room.getRoomId());
+		this.room.notifyHostClosing();
+		deleteRoom(this.room.getRoomId(), this.hostLeaseToken);
 		this.room.destory();
 		this.peer.destroy();
 		this.clientHeartCheckFns.clear();

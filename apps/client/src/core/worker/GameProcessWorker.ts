@@ -380,18 +380,13 @@ async function handleMessage(data: WorkerCommMsg) {
 		case WorkerCommType.LoadGameInfo:
 			{
 				try {
-					const { mapInfo, setting, userList, roomOwnerId, aiConfig, saveData } = data.data;
+					const { mapInfo, setting, userList, roomOwnerId, aiConfig, saveData, initSessionId } = data.data;
 					applyAIDecisionConfig(aiConfig);
 					gameProcess = new GameProcess(mapInfo, setting, userList, roomOwnerId);
-					if (saveData) {
-						gameProcess.setPendingSaveData(saveData);
-					}
-					gameProcess.start();
-
-					// 发送gameProcess就绪消息给主线程，包含gameProcess引用
-					self.postMessage(<WorkerCommMsg>{
-						type: WorkerCommType.GameProcessReady,
-						data: undefined, // 暂时不需要数据
+					gameProcess.setInitSessionId(initSessionId);
+					if (saveData) gameProcess.setPendingSaveData(saveData);
+					void gameProcess.start().catch((error) => {
+						reportWorkerError(error, "GameProcess.start");
 					});
 				} catch (e: any) {
 					console.error("[LoadGameInfo Error]:", e);
@@ -411,8 +406,9 @@ async function handleMessage(data: WorkerCommMsg) {
 			break;
 		case WorkerCommType.EmitOperation:
 			{
-				const { userId, operateType, data: _data } = data.data;
+				const { userId, operateType, data: _data, metadata } = data.data;
 				operationListener.emit(userId, operateType, _data);
+				if (operateType === OperateType.GameInitFinished) gameProcess?.handleInitSignal(userId, metadata);
 
 				// 特殊处理：如果是动画完成事件，检查并调用对应的处理器
 				if (operateType === OperateType.Animation && _data && typeof _data === "string") {
@@ -517,6 +513,14 @@ function sendToUsers(userIdList: string[], msg: ServerSocketMessage) {
 
 
 export class GameProcess implements IGameProcess {
+	private initSessionId = "";
+	private initialInitBarrier = new Map<string, "pending" | "ready" | "failed" | "offline-ai">();
+	private initialInitResolve: (() => void) | null = null;
+	private initialInitTimeout: ReturnType<typeof setTimeout> | null = null;
+	private reconnectInitSessions = new Map<string, { sessionId: string; timeout: ReturnType<typeof setTimeout> }>();
+	private processedInitMessageIds = new Set<string>();
+	private static readonly INIT_BARRIER_TIMEOUT = 60000;
+
 	public eventBus: Emitter<GameRuntimeEvent> = mitt<GameRuntimeEvent>();
 	public customData: Record<string, any> = {};
 	public exportData: IGameProcessExportData = {} as IGameProcessExportData;
@@ -3300,15 +3304,72 @@ export class GameProcess implements IGameProcess {
 		}
 	}
 
-	private async waitInitFinished() {
-		const promiseArr: Promise<any>[] = [];
-		Array.from(this.players.values()).forEach((player) => {
-			if (player.isAI) return;
-			promiseArr.push(operationListener.onceAsync(player.id, OperateType.GameInitFinished));
-		});
-		await Promise.all(promiseArr);
+	public setInitSessionId(initSessionId: string): void { this.initSessionId = initSessionId; }
 
-		this.gameBroadcast({ type: SocketMsgType.GameInitFinished, data: undefined, source: SocketMsgSource.Server });
+	private prepareInitialInitBarrier(): void {
+		this.initialInitBarrier.clear();
+		for (const player of this.players.values()) {
+			if (!player.isAI) this.initialInitBarrier.set(player.id, "pending");
+		}
+	}
+
+	private async waitInitFinished(): Promise<void> {
+		if (this.initialInitBarrier.size === 0) {
+			this.gameBroadcast({ type: SocketMsgType.GameInitFinished, data: undefined, source: SocketMsgSource.Server, extra: { initSessionId: this.initSessionId } });
+			return;
+		}
+		await new Promise<void>((resolve) => {
+			this.initialInitResolve = resolve;
+			this.initialInitTimeout = setTimeout(() => {
+				for (const [userId, status] of this.initialInitBarrier) {
+					if (status === "pending") this.markInitialPlayerOffline(userId, "初始化确认超时");
+				}
+				this.resolveInitialBarrierIfComplete();
+			}, GameProcess.INIT_BARRIER_TIMEOUT);
+		});
+		this.gameBroadcast({ type: SocketMsgType.GameInitFinished, data: undefined, source: SocketMsgSource.Server, extra: { initSessionId: this.initSessionId } });
+	}
+
+	public handleInitSignal(userId: string, metadata?: { initSessionId?: string; initStatus?: "ready" | "failed"; reason?: string; messageId?: string }): void {
+		if (metadata?.messageId) {
+			if (this.processedInitMessageIds.has(metadata.messageId)) return;
+			this.processedInitMessageIds.add(metadata.messageId);
+		}
+		const reconnect = this.reconnectInitSessions.get(userId);
+		if (reconnect && reconnect.sessionId === metadata?.initSessionId) {
+			clearTimeout(reconnect.timeout);
+			this.reconnectInitSessions.delete(userId);
+			if (metadata?.initStatus === "failed") {
+				this.sendToPlayer(userId, { type: SocketMsgType.GameInitAborted, source: SocketMsgSource.Server, data: { initSessionId: reconnect.sessionId, reason: metadata?.reason || "游戏初始化失败" } });
+				this.handlePlayerOffline(userId);
+			} else {
+				this.sendToPlayer(userId, { type: SocketMsgType.GameInitFinished, source: SocketMsgSource.Server, data: undefined, extra: { initSessionId: reconnect.sessionId } });
+			}
+			return;
+		}
+		if (metadata?.initSessionId !== this.initSessionId || !this.initialInitBarrier.has(userId)) return;
+		if (metadata?.initStatus === "failed") {
+			this.initialInitBarrier.set(userId, "failed");
+			this.sendToPlayer(userId, { type: SocketMsgType.GameInitAborted, source: SocketMsgSource.Server, data: { initSessionId: this.initSessionId, reason: metadata.reason || "游戏初始化失败" } });
+			this.markInitialPlayerOffline(userId, metadata.reason || "游戏初始化失败");
+		} else {
+			this.initialInitBarrier.set(userId, "ready");
+		}
+		this.resolveInitialBarrierIfComplete();
+	}
+
+	private markInitialPlayerOffline(userId: string, _reason: string): void {
+		if (this.initialInitBarrier.get(userId) === "offline-ai") return;
+		this.initialInitBarrier.set(userId, "offline-ai");
+		this.handlePlayerOffline(userId);
+	}
+
+	private resolveInitialBarrierIfComplete(): void {
+		if (Array.from(this.initialInitBarrier.values()).some((status) => status === "pending")) return;
+		if (this.initialInitTimeout) clearTimeout(this.initialInitTimeout);
+		this.initialInitTimeout = null;
+		this.initialInitResolve?.();
+		this.initialInitResolve = null;
 	}
 
 	public async runGamePhase(phase: IGamePhase<GameContext>, context?: GameContext) {
@@ -3916,14 +3977,19 @@ export class GameProcess implements IGameProcess {
 			}
 
 			// 步骤3: 发送游戏初始化消息给客户端（已包含存档恢复后的状态）
+			this.prepareInitialInitBarrier();
 			this.gameBroadcast({
 				type: SocketMsgType.GameInit,
 				source: SocketMsgSource.Server,
 				data: this.getGameData(),
+				extra: { initSessionId: this.initSessionId },
 			});
 
 			// 步骤4: 等待客户端初始化完成
 			await this.waitInitFinished();
+
+			// 在所有真人玩家完成初始化、失败或切换 AI 托管后才通知房主清除初始化超时。
+			self.postMessage(<WorkerCommMsg>{ type: WorkerCommType.GameProcessReady, data: undefined });
 
 			// 启动心跳机制
 			this.startHeartbeat();
@@ -4121,6 +4187,10 @@ export class GameProcess implements IGameProcess {
 	}
 
 	public handlePlayerOffline(userId: string) {
+		if (this.initialInitBarrier.get(userId) === "pending") {
+			this.initialInitBarrier.set(userId, "offline-ai");
+			this.resolveInitialBarrierIfComplete();
+		}
 		const player = this.getPlayerById(userId);
 		if (player) {
 			// 清理玩家的所有按钮
@@ -4155,17 +4225,18 @@ export class GameProcess implements IGameProcess {
 				data: undefined,
 			});
 
+			const initSessionId = randomString(16);
+			const timeout = setTimeout(() => {
+				this.reconnectInitSessions.delete(userId);
+				this.sendToPlayer(userId, { type: SocketMsgType.GameInitAborted, source: SocketMsgSource.Server, data: { initSessionId, reason: "重连初始化超时" } });
+				this.handlePlayerOffline(userId);
+			}, GameProcess.INIT_BARRIER_TIMEOUT);
+			this.reconnectInitSessions.set(userId, { sessionId: initSessionId, timeout });
 			sendToUsers([userId], {
 				type: SocketMsgType.GameInit,
 				source: SocketMsgSource.Server,
 				data: this.getGameData(),
-			});
-			operationListener.once(userId, OperateType.GameInitFinished, () => {
-				sendToUsers([userId], {
-					type: SocketMsgType.GameInitFinished,
-					source: SocketMsgSource.Server,
-					data: undefined,
-				});
+				extra: { initSessionId },
 			});
 			this.gameDataBroadcast();
 		} else {

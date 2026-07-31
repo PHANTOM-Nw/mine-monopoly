@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "crypto";
 import { createRecord } from "#src/db/api/game-record";
 import { ResInterface } from "#src/interfaces/res";
 import { User } from "#src/interfaces/bace";
@@ -17,18 +18,28 @@ type RoomMapItem = {
 	isStarted: boolean;
 	mapId: string | null;
 	mapName: string | null;
+	status: "active" | "closed" | "expired";
+	statusUpdatedAt: number;
+	hostLeaseToken: string;
+	hostEpoch: number;
 };
 
 export const roomRouter = Router();
-const heartContinuationTimeMs = 10000; //1分钟的持续时间, 如果一分钟内没有发送心跳, 删除房间;
+const heartContinuationTimeMs = 10000; // 房主心跳租约时长
+const closedSessionRetentionMs = 5 * 60 * 1000;
 const roomMap = new Map<string, RoomMapItem>();
 
 //删除房间定时器
 setInterval(() => {
 	Array.from(roomMap.entries()).forEach((room) => {
-		if (room[1].deleteTime < Date.now()) {
-			const roomItem = room[1];
+		const roomItem = room[1];
+		if (roomItem.status === "active" && roomItem.deleteTime < Date.now()) {
+			roomItem.status = "expired";
+			roomItem.statusUpdatedAt = Date.now();
+			roomItem.hostPeerId = null;
 			createRecord(roomItem.roomId, Date.now() - roomItem.createTime, roomItem.mapId, roomItem.mapName);
+		}
+		if (roomItem.status !== "active" && roomItem.statusUpdatedAt + closedSessionRetentionMs < Date.now()) {
 			roomMap.delete(room[0]);
 		}
 	});
@@ -53,12 +64,15 @@ roomRouter.get("/join", async (req, res, next) => {
 
 	if (roomId && roomId.length < 13) {
 		if (roomMap.has(roomId)) {
-			//有roomId的话
 			const room = roomMap.get(roomId);
+			if (room && room.status !== "active") {
+				res.status(410).json({ status: 410, msg: room.status === "closed" ? "房间已关闭" : "房间已过期", data: { status: room.status } });
+				return;
+			}
 			if (room && room.hostPeerId !== null) {
 				const resMsg: ResInterface = {
 					status: 200,
-					data: { hostPeerId: room.hostPeerId, needCreate: false, iceServers },
+					data: { hostPeerId: room.hostPeerId, needCreate: false, iceServers, hostEpoch: room.hostEpoch },
 				};
 				res.status(resMsg.status).json(resMsg);
 			} else {
@@ -82,10 +96,14 @@ roomRouter.get("/join", async (req, res, next) => {
 				isStarted: false,
 				mapId: null,
 				mapName: null,
+				status: "active",
+				statusUpdatedAt: Date.now(),
+				hostLeaseToken: randomUUID(),
+				hostEpoch: 0,
 			});
 			const resMsg: ResInterface = {
 				status: 200,
-				data: { hostPeerId: "", needCreate: true, deleteIntervalMs: heartContinuationTimeMs, iceServers },
+				data: { hostPeerId: "", needCreate: true, deleteIntervalMs: heartContinuationTimeMs, iceServers, hostLeaseToken: roomMap.get(roomId)!.hostLeaseToken, hostEpoch: 0 },
 			};
 			res.status(resMsg.status).json(resMsg);
 		}
@@ -99,23 +117,30 @@ roomRouter.get("/join", async (req, res, next) => {
 });
 
 roomRouter.post("/emit-host", async (req, res, next) => {
-	const { roomId, hostPeerId, hostName, hostId } = req.body as {
+	const { roomId, hostPeerId, hostName, hostId, hostLeaseToken } = req.body as {
 		roomId: string;
 		hostPeerId: string;
 		hostName: string;
 		hostId: string;
+		hostLeaseToken: string;
 	};
 	if (roomId && hostPeerId && hostName && hostId) {
 		if (roomMap.has(roomId)) {
 			// roomMap.set(roomId, { roomId,hostPeerId, deleteTime: Date.now() + heartContinuationTimeMs });
 			const item = roomMap.get(roomId) as RoomMapItem;
+			if (item.status !== "active" || item.hostLeaseToken !== hostLeaseToken) {
+				res.status(409).json({ status: 409, msg: "房主租约无效" });
+				return;
+			}
 			item.hostPeerId = hostPeerId;
+			item.hostEpoch++;
 			item.hostName = hostName;
 			item.hostId = hostId;
 			item.deleteTime = Date.now() + heartContinuationTimeMs;
 
 			const resMsg: ResInterface = {
 				status: 200,
+				data: { hostEpoch: item.hostEpoch },
 			};
 			res.status(resMsg.status).json(resMsg);
 		} else {
@@ -134,31 +159,34 @@ roomRouter.post("/emit-host", async (req, res, next) => {
 	}
 });
 
-roomRouter.post("/delete", async (req, res, next) => {
-	const { roomId } = req.query as { roomId: string };
-	if (roomId) {
-		if (roomMap.has(roomId)) roomMap.delete(roomId);
-		const resMsg: ResInterface = {
-			status: 200,
-		};
-		res.status(resMsg.status).json(resMsg);
-	} else {
-		const resMsg: ResInterface = {
-			status: 400,
-			msg: "RoomId不符合标准",
-		};
-		res.status(resMsg.status).json(resMsg);
-	}
+roomRouter.post("/delete", async (req, res) => {
+	const { roomId, hostLeaseToken } = req.query as { roomId: string; hostLeaseToken?: string };
+	const room = roomMap.get(roomId);
+	if (!room) { res.status(200).json({ status: 200 }); return; }
+	if (room.hostLeaseToken !== hostLeaseToken) { res.status(409).json({ status: 409, msg: "房主租约无效" }); return; }
+	room.status = "closed";
+	room.statusUpdatedAt = Date.now();
+	room.hostPeerId = null;
+	res.status(200).json({ status: 200 });
 });
 
-roomRouter.get("/heart", async (req, res, next) => {
+roomRouter.get("/status", async (req, res) => {
 	const { roomId } = req.query as { roomId: string };
 	const room = roomMap.get(roomId);
-	if (room) {
-		const now = Date.now();
-		room.deleteTime = now + heartContinuationTimeMs;
-		room.lastHeartTime = now;
+	if (!room) { res.status(200).json({ status: 200, data: { status: "expired", hostEpoch: 0 } }); return; }
+	res.status(200).json({ status: 200, data: { status: room.status, hostEpoch: room.hostEpoch } });
+});
+
+roomRouter.get("/heart", async (req, res) => {
+	const { roomId, hostLeaseToken } = req.query as { roomId: string; hostLeaseToken?: string };
+	const room = roomMap.get(roomId);
+	if (!room || room.status !== "active" || room.hostLeaseToken !== hostLeaseToken) {
+		res.status(409).json({ status: 409, msg: "房主租约无效" });
+		return;
 	}
+	const now = Date.now();
+	room.deleteTime = now + heartContinuationTimeMs;
+	room.lastHeartTime = now;
 	res.status(200).end();
 });
 

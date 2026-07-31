@@ -319,6 +319,11 @@ export interface SocketMessageDataType {
 		server: undefined;
 	};
 
+	[SocketMsgType.GameInitAborted]: {
+		client: never;
+		server: { initSessionId: string; reason: string };
+	};
+
 	/**
 	 * 游戏数据
 	 * 服务器向客户端同步游戏数据

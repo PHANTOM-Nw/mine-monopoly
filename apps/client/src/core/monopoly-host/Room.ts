@@ -109,6 +109,7 @@ export class Room {
 	/** 最大重试次数 */
 	private readonly MAX_RETRY = 3;
 	private initTimeoutTimer: number | null = null;
+	private initSessionId: string | null = null;
 	// 标记是否正在手动请求快照（避免重复保存）
 	private isManuallyRequestingSnapshot: boolean = false;
 	// 标记是否正在进入安全模式（防止重复调用）
@@ -116,7 +117,7 @@ export class Room {
 
 	private static readonly HEARTBEAT_NORMAL_TIMEOUT = 15000;
 	private static readonly HEARTBEAT_BUSY_TIMEOUT = 60000;
-	private static readonly INIT_TIMEOUT = 30000;
+	private static readonly INIT_TIMEOUT = 65000;
 	private static readonly MAX_ROOM_PLAYERS = 6;
 	private static readonly AI_COLOR_PALETTE = [
 		"#4f83ff",
@@ -605,6 +606,16 @@ export class Room {
 		this.roomBroadcast(msg);
 	}
 
+	public notifyHostClosing(): void {
+		for (const [userId, user] of this.userList) {
+			if (userId === this.ownerId) continue;
+			this.sendToClient(user.socketClient, SocketMsgType.LeaveRoom, undefined, {
+				type: "warning",
+				content: "房主已退出，房间已关闭",
+			});
+		}
+	}
+
 	/**
 	 * 将信息广播到房间内的全部用户
 	 */
@@ -780,7 +791,7 @@ export class Room {
 
 	private handleUserOffline(userId: string) {
 		const user = this.userList.get(userId);
-		if (!user) return;
+		if (!user || user.isOffLine) return;
 		user.isOffLine = true;
 		if (this.gameProcessWorker) {
 			this.gameProcessWorker.postMessage(<WorkerCommMsg>{
@@ -807,21 +818,35 @@ export class Room {
 			this.startMapChunkTransfer(userId, this.mapInfo!);
 
 			// 等待地图资源加载完成
-			await this.operationListener.onceAsync(userId, OperateType.MapResourceLoaded);
+			try {
+				await Promise.race([
+					this.operationListener.onceAsync(userId, OperateType.MapResourceLoaded),
+					new Promise((_, reject) => setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT)),
+				]);
+			} catch (error) {
+				this.sendToClient(newCoon, SocketMsgType.GameInitAborted, {
+					initSessionId: crypto.randomUUID(),
+					reason: error instanceof Error ? error.message : "地图资源加载失败",
+				});
+				this.handleUserOffline(userId);
+				return;
+			}
 
 			if (this.gameProcessWorker) {
 				this.gameProcessWorker.postMessage(<WorkerCommMsg>{
 					type: WorkerCommType.UserReconnect,
 					data: { userId: oldUser.userId },
 				});
-
-				this.roomBroadcast({
-					type: SocketMsgType.MsgNotify,
-					source: SocketMsgSource.Server,
-					data: undefined,
-					msg: { type: "success", content: `${oldUser.username}重新连接` },
-				});
 			}
+
+			oldUser.isOffLine = false;
+			this.roomInfoBroadcast();
+			this.roomBroadcast({
+				type: SocketMsgType.MsgNotify,
+				source: SocketMsgSource.Server,
+				data: undefined,
+				msg: { type: "success", content: `${oldUser.username}重新连接` },
+			});
 		} else {
 			console.log("奇怪的玩家 in room");
 		}
@@ -1128,6 +1153,7 @@ export class Room {
 		this.enteringSafeMode = false;
 
 		// 启动初始化超时定时器
+		this.initSessionId = crypto.randomUUID();
 		this.startInitTimeout();
 
 		this.gameProcessWorker = new GameProcessWorker();
@@ -1198,8 +1224,9 @@ export class Room {
 		return this.userList.has(userId);
 	}
 
-	public emitOperation<T extends OperateType>(userId: string, operateType: T, data?: PlayerOperationResult[T]) {
+	public emitOperation<T extends OperateType>(userId: string, operateType: T, data?: PlayerOperationResult[T], metadata?: import("@src/interfaces/worker").InitOperationMeta) {
 		this.operationListener.emit(userId, operateType, data);
+		if (operateType === OperateType.GameInitFinished && metadata?.initStatus === "failed") this.handleUserOffline(userId);
 		if (!this.gameProcessWorker) return;
 		this.gameProcessWorker.postMessage(<WorkerCommMsg>{
 			type: WorkerCommType.EmitOperation,
@@ -1207,6 +1234,7 @@ export class Room {
 				userId,
 				operateType,
 				data,
+				metadata,
 			},
 		});
 	}
@@ -1721,6 +1749,11 @@ export class Room {
 			type: "error",
 			message: `游戏初始化失败: ${failureReason}`,
 		});
+		this.roomBroadcast({
+			type: SocketMsgType.GameInitAborted,
+			source: SocketMsgSource.Server,
+			data: { initSessionId: this.initSessionId || crypto.randomUUID(), reason: failureReason },
+		});
 
 		// 重置游戏状态
 		this.isStarted = false;
@@ -2107,19 +2140,12 @@ export class Room {
 		this.isStarted = false;
 		this.transitionTo(WorkerState.Terminated, "房主放弃游戏");
 
-		// 通知所有玩家
-		this.roomBroadcast({
-			type: SocketMsgType.MsgNotify,
-			source: SocketMsgSource.Server,
-			data: undefined,
-			msg: { type: "warning", content: "房主放弃了当前游戏" },
-		});
-
 		// 通知所有玩家游戏结束并返回房间
 		this.roomBroadcast({
 			type: SocketMsgType.GameOver,
 			source: SocketMsgSource.Server,
 			data: { returnToRoom: true },
+			msg: { type: "warning", content: "房主放弃了当前游戏" },
 		});
 
 		// 重置所有玩家准备状态
@@ -2477,6 +2503,7 @@ export class Room {
 				roomOwnerId: this.ownerId,
 				aiConfig: this.aiDecisionConfig,
 				saveData: this.pendingSaveData ?? undefined,
+				initSessionId: this.initSessionId || crypto.randomUUID(),
 			},
 		});
 
@@ -2571,7 +2598,7 @@ export class Room {
 		for (const userId of data.userIdList) {
 			const user = this.userList.get(userId);
 			if (user) {
-				this.sendToClient(user.socketClient, data.data.type, data.data.data, data.data.msg);
+				this.sendToClient(user.socketClient, data.data.type, data.data.data, data.data.msg, data.data.extra);
 			}
 		}
 
@@ -2582,7 +2609,7 @@ export class Room {
 		) {
 			const owner = this.userList.get(this.ownerId);
 			if (owner) {
-				this.sendToClient(owner.socketClient, data.data.type, data.data.data, data.data.msg);
+				this.sendToClient(owner.socketClient, data.data.type, data.data.data, data.data.msg, data.data.extra);
 			}
 		}
 	}

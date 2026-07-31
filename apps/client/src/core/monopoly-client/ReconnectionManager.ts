@@ -50,7 +50,8 @@ export class ReconnectionManager {
       onRetry: config.onRetry ?? (() => {}),
       onSuccess: config.onSuccess ?? (() => {}),
       onFail: config.onFail ?? (() => {}),
-      onCancel: config.onCancel ?? (() => {})
+      onCancel: config.onCancel ?? (() => {}),
+      shouldRetry: config.shouldRetry ?? (() => true)
     };
   }
 
@@ -218,11 +219,23 @@ export class ReconnectionManager {
       // 连接失败，继续重试
       console.error(`[ReconnectionManager] 重连失败 (${this.retryCount}/${this.config.maxRetries}):`, error);
 
+      if (!this.config.shouldRetry(error instanceof Error ? error : new Error(String(error)))) {
+        this.handleFatalError(error);
+        return;
+      }
+
       // 检查是否达到最大重试次数
       if (this.retryCount >= this.config.maxRetries) {
         this.handleMaxRetriesReached();
       }
     }
+  }
+
+  private handleFatalError(error: unknown): void {
+    this.clearTimers();
+    this.closeMessageCard();
+    this.state = ReconnectState.FAILED;
+    this.config.onFail(error instanceof Error ? error : new Error(String(error)));
   }
 
   /**

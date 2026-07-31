@@ -165,6 +165,8 @@ export interface ReconnectConfig {
   onFail?: (error: Error) => void;
   /** 取消回调 */
   onCancel?: () => void;
+  /** 返回 false 时立即停止重连并视为失败 */
+  shouldRetry?: (error: Error) => boolean;
 }
 
 /**

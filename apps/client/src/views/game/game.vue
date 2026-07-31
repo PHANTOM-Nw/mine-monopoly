@@ -116,6 +116,10 @@
 			// 恢复心跳检测
 			socketClient.resumeHeartBeat();
 
+			useEventBus().on("game:init", () => {
+				if (!amISpectator.value) void socketClient.gameInitFinished();
+			});
+
 			if (amISpectator.value) {
 				useLoading().hideLoading();
 			} else {
@@ -179,6 +183,7 @@
 				mapName: mapDataStore.info?.name || "unknown",
 				route: window.location.pathname,
 			});
+			void socketClient?.gameInitFailed(diagnostics.rawMessage);
 			console.error("[GameInitFailure]", diagnostics, e);
 			logErrorWithOptions({
 				category: ErrorCategory.UI_RENDER,

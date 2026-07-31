@@ -130,6 +130,9 @@ export function handleServerSocketMessage(msg: ServerSocketMessage, client: Mono
 		case SocketMsgType.GameInitFinished:
 			handleGameInitFinished(msg, client);
 			break;
+		case SocketMsgType.GameInitAborted:
+			handleGameInitAborted(msg, client);
+			break;
 		case SocketMsgType.GameData:
 			handleGameData(msg, client);
 			break;
@@ -253,26 +256,27 @@ const handleJoinRoomReply: ServerMessageHandler<SocketMsgType.JoinRoom> = (msg) 
 
 const handleLeaveRoomReply: ServerMessageHandler<SocketMsgType.LeaveRoom> = (msg, client) => {
 	clearReceiveState();
-	if (!msg.msg) {
-		FPMessage({ type: "success", message: "退出房间" });
-	}
+	const notification = msg.msg || { type: "success" as const, content: "退出房间" };
 	useRoomInfo().$reset();
 	useChat().$reset();
 	useGameLog().$reset();
 	useGameData().$reset();
 	client.destory();
-	router.replace({ name: "room-router" });
+	void router.replace({ name: "room-router" }).finally(() => {
+		FPMessage({ type: notification.type, message: notification.content });
+	});
 };
 
 const handleKickOutReply: ServerMessageHandler<SocketMsgType.KickOut> = (msg, client) => {
 	clearReceiveState();
-	FPMessage({ type: "error", message: "你已被踢出房间" });
 	useRoomInfo().$reset();
 	useChat().$reset();
 	useGameLog().$reset();
 	useGameData().$reset();
 	client.destory();
-	router.replace({ name: "room-router" });
+	void router.replace({ name: "room-router" }).finally(() => {
+		FPMessage({ type: "error", message: "你已被踢出房间" });
+	});
 };
 
 const handleRoomInfoReply: ServerMessageHandler<SocketMsgType.RoomInfo> = (msg) => {
@@ -387,7 +391,8 @@ const handleGameStartReply: ServerMessageHandler<SocketMsgType.GameStart> = () =
 	});
 };
 
-const handleGameInit: ServerMessageHandler<SocketMsgType.GameInit> = (msg) => {
+const handleGameInit: ServerMessageHandler<SocketMsgType.GameInit> = (msg, client) => {
+	client.registerGameInitSession(msg.extra?.initSessionId);
 	const gameDataStore = useGameData();
 	const gameData = msg.data;
 	if (gameData) {
@@ -414,7 +419,17 @@ const handleGameInit: ServerMessageHandler<SocketMsgType.GameInit> = (msg) => {
 	}
 	const loadingStore = useLoading();
 	loadingStore.text = "获取数据成功，加载中...";
+	const isAlreadyInGame = router.currentRoute.value.name === "game";
 	router.replace({ name: "game" });
+	if (isAlreadyInGame) useEventBus().emit("game:init", msg.extra?.initSessionId);
+};
+
+const handleGameInitAborted: ServerMessageHandler<SocketMsgType.GameInitAborted> = (msg) => {
+	useLoading().hideLoading();
+	const message = msg.data.reason || "游戏初始化失败，已返回房间";
+	void router.replace({ name: "room" }).finally(() => {
+		FPMessage({ type: "error", message });
+	});
 };
 
 const handleGameInitFinished: ServerMessageHandler<SocketMsgType.GameInitFinished> = () => {
@@ -579,18 +594,20 @@ const handlePlayerTp: ServerMessageHandler<SocketMsgType.PlayerTp> = (msg) => {
 };
 
 const handleGameOver: ServerMessageHandler<SocketMsgType.GameOver> = (msg) => {
+	if (msg.msg) useLoading().hideLoading();
 	const gameInfoStore = useGameData();
-	// 安全模式放弃游戏时回到房间，不显示排行榜
 	if (msg.data?.returnToRoom) {
-		// 清理游戏数据但保持房间连接
 		useRoomInfo().$patch({ isStarted: false });
 		useChat().$reset();
 		useGameLog().$reset();
 		gameInfoStore.$reset();
-		router.replace({ name: "room" });
+		void router.replace({ name: "room" }).finally(() => {
+			if (msg.msg) FPMessage({ type: msg.msg.type, message: msg.msg.content });
+		});
 		return;
 	}
 	gameInfoStore.isGameOver = true;
+	if (msg.msg) FPMessage({ type: msg.msg.type, message: msg.msg.content });
 };
 
 const handleGamePause: ServerMessageHandler<SocketMsgType.PauseGame> = () => {
@@ -902,6 +919,7 @@ const handleMapChunkEnd: ServerMessageHandler<SocketMsgType.MapChunkEnd> = async
 			error: e instanceof Error ? e : undefined,
 		});
 		FPMessage({ type: "error", message: `地图加载失败: ${e.message}` });
+		void client.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.MapResourceLoaded, data: undefined }, extra: { initStatus: "failed", reason: e.message } });
 		useLoading().hideLoading();
 		client.resumeHeartBeat();
 	}
