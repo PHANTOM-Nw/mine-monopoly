@@ -120,7 +120,7 @@ export const modifierTemplateTools = [
 	},
 	{
 		name: "list_modifier_templates",
-		description: "列出所有修饰器模板。无参数。",
+		description: "列出所有修饰器模板的摘要信息，不包含 effectCode。使用 get_modifier_template 并传入 templateId 获取完整数据。",
 		inputSchema: ListModifierTemplatesToolSchema,
 		handler: listModifierTemplates,
 	},

@@ -35,6 +35,10 @@ const RemoveMapEventToolSchema = z.object({
 	eventId: z.string().describe("地图事件ID"),
 });
 
+const GetMapEventByIdToolSchema = z.object({
+	eventId: z.string().describe("地图事件ID"),
+});
+
 const ListMapEventsToolSchema = z.object({});
 
 /**
@@ -74,6 +78,18 @@ export async function removeMapEvent(args: unknown) {
 }
 
 /**
+ * Get a map event with full details
+ */
+export async function getMapEventById(args: unknown) {
+	try {
+		const result = await invokeTool("get_map_event_by_id", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get map event");
+	}
+}
+
+/**
  * List all map events
  */
 export async function listMapEvents(args: unknown) {
@@ -108,8 +124,14 @@ export const mapEventTools = [
 		handler: removeMapEvent
 	},
 	{
+		name: "get_map_event_by_id",
+		description: "根据ID获取单个地图事件的完整信息，包含 effectCode。参数：eventId（地图事件ID）",
+		inputSchema: GetMapEventByIdToolSchema,
+		handler: getMapEventById
+	},
+	{
 		name: "list_map_events",
-		description: "获取当前地图中所有地图事件的列表。返回所有地图事件的完整信息，包括 ID、名称、类型、描述、图标ID和效果代码。",
+		description: "获取当前地图中所有地图事件的摘要列表，包含 ID、名称、类型、描述和图标ID；不包含 effectCode。使用 get_map_event_by_id 获取完整数据。",
 		inputSchema: ListMapEventsToolSchema,
 		handler: listMapEvents
 	}

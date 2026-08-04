@@ -195,7 +195,7 @@ async function loadTools() {
 		if (result && Array.isArray(result)) {
 			tools.value = result.map((tool: any) => ({
 				name: tool.name,
-				category: getCategory(tool.name),
+				category: tool.category || getCategory(tool.name),
 				description: tool.description || "暂无描述",
 			}));
 			console.log("[MCP Vue] Processed tools:", tools.value);

@@ -743,6 +743,7 @@ ipcMain.handle("get-mcp-tools", async () => {
 	return tools.map((tool: any) => ({
 		name: tool.name,
 		description: tool.description,
+		category: tool.category,
 	}));
 });
 

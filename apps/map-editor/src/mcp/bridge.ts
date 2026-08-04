@@ -11,6 +11,7 @@ export type MCPToolName =
 	| "add_chance_card"
 	| "update_chance_card"
 	| "remove_chance_card"
+	| "get_chance_card_by_id"
 	| "list_chance_cards"
 	// Map event tools
 	| "add_map_event"
@@ -22,9 +23,11 @@ export type MCPToolName =
 	| "add_role"
 	| "update_role"
 	| "remove_role"
+	| "get_role_by_id"
 	| "list_roles"
 	// Game phase tools
 	| "get_phases"
+	| "get_phase_by_id"
 	| "add_phase"
 	| "remove_phase"
 	| "update_phase"
@@ -32,20 +35,29 @@ export type MCPToolName =
 	| "get_extra_libs"
 	| "update_extra_libs"
 	| "get_all_type_libs"
+	| "list_type_libs"
+	| "get_type_lib"
 	// Resource tools
 	| "list_models"
 	| "list_images"
 	| "get_resource_by_id"
 	| "add_temp_model"
 	| "add_temp_image"
+	| "list_resources"
 	// Map item tools
 	| "list_map_items"
 	| "get_map_item"
+	| "query_map_items"
+	| "plan_map_changes"
+	| "apply_map_changes"
 	// Property tools
 	| "add_property"
 	| "update_property"
 	| "remove_property"
+	| "get_property_by_map_item_id"
+	| "list_properties"
 	// Game setting tools
+	| "get_game_setting"
 	| "list_game_settings"
 	| "add_game_setting"
 	| "update_game_setting"
@@ -71,7 +83,8 @@ export type MCPToolName =
 	// System tools
 	| "check_mcp_connection"
 	// Validate tools
-	| "validate_effect_code";
+	| "validate_effect_code"
+	| "validate_map";
 
 /**
  * MCP tool handler type

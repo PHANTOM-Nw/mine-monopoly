@@ -15,6 +15,10 @@ import { z } from "zod";
  * Actual validation is done in Service Layer
  */
 export const GetPhasesSchema = z.object({});
+export const GetPhaseByIdSchema = z.object({
+	phaseId: z.string(),
+	phaseType: z.string(),
+});
 export const AddPhaseSchema = z.object({
 	id: z.string(),
 	name: z.string(),
@@ -46,6 +50,18 @@ export async function getPhases(args: unknown) {
 		return successResult(result);
 	} catch (error: any) {
 		return errorResult(error.message || "Failed to get phases");
+	}
+}
+
+/**
+ * Get a game phase with full details
+ */
+export async function getPhaseById(args: unknown) {
+	try {
+		const result = await invokeTool("get_phase_by_id", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get phase");
 	}
 }
 
@@ -91,9 +107,15 @@ export async function updatePhase(args: unknown) {
 export const gamePhaseTools = [
 	{
 		name: "get_phases",
-		description: "获取当前地图中定义的所有游戏阶段。游戏阶段控制游戏流程，如掷骰子、玩家移动和事件处理。",
+		description: "获取当前地图中按类别组织的游戏阶段摘要列表，不包含 initEventCode。使用 get_phase_by_id 并传入 phaseId 和 phaseType 获取完整数据。",
 		inputSchema: GetPhasesSchema,
 		handler: getPhases,
+	},
+	{
+		name: "get_phase_by_id",
+		description: "根据ID和阶段类别获取单个游戏阶段的完整信息，包含 initEventCode。参数：phaseId、phaseType。",
+		inputSchema: GetPhaseByIdSchema,
+		handler: getPhaseById,
 	},
 	{
 		name: "add_phase",

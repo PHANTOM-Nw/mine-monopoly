@@ -35,6 +35,10 @@ const RemoveRoleToolSchema = z.object({
 	roleId: z.string().describe("角色ID"),
 });
 
+const GetRoleByIdToolSchema = z.object({
+	roleId: z.string().describe("角色ID"),
+});
+
 const ListRolesToolSchema = z.object({});
 
 /**
@@ -74,6 +78,18 @@ export async function removeRole(args: unknown) {
 }
 
 /**
+ * Get a role with full details
+ */
+export async function getRoleById(args: unknown) {
+	try {
+		const result = await invokeTool("get_role_by_id", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get role");
+	}
+}
+
+/**
  * List all roles
  */
 export async function listRoles(args: unknown) {
@@ -108,8 +124,14 @@ export const roleTools = [
 		handler: removeRole
 	},
 	{
+		name: "get_role_by_id",
+		description: "根据ID获取单个角色的完整信息，包含 initCode。参数：roleId（角色ID）",
+		inputSchema: GetRoleByIdToolSchema,
+		handler: getRoleById
+	},
+	{
 		name: "list_roles",
-		description: "获取当前地图中所有角色的列表。返回所有角色的完整信息，包括 ID、名称、描述、颜色、初始化代码和图片ID。",
+		description: "获取当前地图中所有角色的摘要列表，包含 ID、名称、描述、颜色和图片ID；不包含 initCode。使用 get_role_by_id 获取完整数据。",
 		inputSchema: ListRolesToolSchema,
 		handler: listRoles
 	}

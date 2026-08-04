@@ -9,74 +9,8 @@ import { useMapDataStore, useResourceStore, useEditorStore } from "@src/stores";
 import { createDefaultMapData } from "@src/utils/file";
 import { eventBus } from "@src/utils/event-bus";
 import { mapContentService } from "@src/services";
-
-// Define MCP tool names locally
-type MCPToolName =
-	// Chance card tools
-	| "add_chance_card"
-	| "update_chance_card"
-	| "remove_chance_card"
-	| "list_chance_cards"
-	// Map event tools
-	| "add_map_event"
-	| "update_map_event"
-	| "remove_map_event"
-	| "get_map_event_by_id"
-	| "list_map_events"
-	// Role tools
-	| "add_role"
-	| "update_role"
-	| "remove_role"
-	| "list_roles"
-	// Game phase tools
-	| "get_phases"
-	| "add_phase"
-	| "remove_phase"
-	| "update_phase"
-	// Extra libs tools
-	| "get_extra_libs"
-	| "update_extra_libs"
-	| "get_all_type_libs"
-	// Resource tools
-	| "list_models"
-	| "list_images"
-	| "get_resource_by_id"
-	| "add_temp_model"
-	| "add_temp_image"
-	// Map item tools
-	| "list_map_items"
-	| "get_map_item"
-	// Property tools
-	| "add_property"
-	| "update_property"
-	| "remove_property"
-	// Game setting tools
-	| "list_game_settings"
-	| "add_game_setting"
-	| "update_game_setting"
-	| "remove_game_setting"
-	// UI Template tools
-	| "create_ui_template"
-	| "update_ui_template"
-	| "remove_ui_template"
-	| "get_ui_template"
-	| "list_ui_templates"
-	// Custom UI tools
-	| "create_custom_ui"
-	| "update_custom_ui"
-	| "remove_custom_ui"
-	| "get_custom_ui"
-	| "list_custom_uis"
-	// Modifier Template tools
-	| "create_modifier_template"
-	| "update_modifier_template"
-	| "remove_modifier_template"
-	| "get_modifier_template"
-	| "list_modifier_templates"
-	// System tools
-	| "check_mcp_connection"
-	// Validate tools
-	| "validate_effect_code";
+import type { MCPToolName } from "./bridge.js";
+import { validateMap } from "./utils.js";
 
 /**
  * Send MCP operation feedback event
@@ -96,6 +30,19 @@ function sendMCPFeedback(operation: string, success: boolean, message: string, d
 function toPlain<T>(obj: T): T {
 	return JSON.parse(JSON.stringify(obj));
 }
+
+const batchMutationTools = new Set<MCPToolName>([
+	"add_chance_card", "update_chance_card", "remove_chance_card",
+	"add_map_event", "update_map_event", "remove_map_event",
+	"add_role", "update_role", "remove_role",
+	"add_phase", "update_phase", "remove_phase",
+	"add_property", "update_property", "remove_property",
+	"add_game_setting", "update_game_setting", "remove_game_setting",
+	"create_ui_template", "update_ui_template", "remove_ui_template",
+	"create_custom_ui", "update_custom_ui", "remove_custom_ui",
+	"create_modifier_template", "update_modifier_template", "remove_modifier_template",
+	"update_extra_libs",
+]);
 
 /**
  * Initialize the MCP bridge handler
@@ -150,8 +97,15 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 				break;
 			}
 
+			case "get_chance_card_by_id": {
+				const chanceCard = mapDataStore.chanceCards.find((card) => card.id === args.cardId);
+				if (!chanceCard) throw new Error(`ChanceCard with ID ${args.cardId} not found`);
+				result = toPlain(chanceCard);
+				break;
+			}
+
 			case "list_chance_cards": {
-				result = toPlain(mapDataStore.chanceCards);
+				result = toPlain(mapDataStore.chanceCards.map(({ effectCode, ...chanceCard }) => chanceCard));
 				break;
 			}
 
@@ -182,7 +136,7 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 			}
 
 			case "list_map_events": {
-				result = toPlain(mapDataStore.mapEvents);
+				result = toPlain(mapDataStore.mapEvents.map(({ effectCode, ...mapEvent }) => mapEvent));
 				break;
 			}
 
@@ -205,15 +159,36 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 				break;
 			}
 
+			case "get_role_by_id": {
+				const role = mapDataStore.roles.find((entry) => entry.id === args.roleId);
+				if (!role) throw new Error(`Role with ID ${args.roleId} not found`);
+				result = toPlain(role);
+				break;
+			}
+
 			case "list_roles": {
-				result = toPlain(mapDataStore.roles);
+				result = toPlain(mapDataStore.roles.map(({ initCode, ...role }) => role));
 				break;
 			}
 
 			// Game Phase Tools
 			case "get_phases": {
 				const serviceResult = await mapContentService.getPhases();
-				result = toPlain(serviceResult);
+				result = toPlain(Object.fromEntries(
+					Object.entries(serviceResult).map(([phaseType, phases]) => [
+						phaseType,
+						(phases as any[]).map(({ initEventCode, ...phase }) => phase),
+					]),
+				));
+				break;
+			}
+
+			case "get_phase_by_id": {
+				const phaseType = args.phaseType as keyof typeof mapDataStore.phases;
+				const phases = mapDataStore.phases[phaseType];
+				const phase = phases?.find((entry: any) => entry.id === args.phaseId);
+				if (!phase) throw new Error(`Phase with ID ${args.phaseId} not found in ${args.phaseType}`);
+				result = toPlain(phase);
 				break;
 			}
 
@@ -250,9 +225,24 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 				break;
 			}
 
-			case "get_all_type_libs": {
-				const serviceResult = await mapContentService.getAllTypeLibs();
-				result = toPlain(serviceResult);
+
+			case "list_type_libs": {
+				const typeLibraries = await mapContentService.getAllTypeLibs();
+				result = Object.entries(typeLibraries).map(([id, code]) => ({ id: id.replace(/([A-Z])/g, "-$1").toLowerCase(), characters: code.length }));
+				break;
+			}
+
+			case "get_type_lib": {
+				const typeLibraries = await mapContentService.getAllTypeLibs();
+				const keyMap: Record<string, keyof typeof typeLibraries> = {
+					"extra-libs": "extraLibs",
+					"ui-template-types": "uiTemplateTypes",
+					"game-setting-types": "gameSettingTypes",
+					"modifier-template-types": "modifierTemplateTypes",
+				};
+				const key = keyMap[args.typeLibId];
+				if (!key) throw new Error(`Unknown type library: ${args.typeLibId}`);
+				result = { id: args.typeLibId, code: typeLibraries[key] };
 				break;
 			}
 
@@ -264,6 +254,15 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 			case "list_images":
 				result = toPlain(resourceStore.images);
 				break;
+
+			case "list_resources": {
+				const resources = [
+					...resourceStore.models.map((resource) => ({ ...resource, resourceType: "model" })),
+					...resourceStore.images.map((resource) => ({ ...resource, resourceType: "image" })),
+				].filter((resource) => (!args.type || resource.resourceType === args.type) && (!args.query || resource.name.toLowerCase().includes(args.query.toLowerCase())));
+				result = { total: resources.length, offset: args.offset, limit: args.limit, items: toPlain(resources.slice(args.offset, args.offset + args.limit)) };
+				break;
+			}
 
 			case "get_resource_by_id": {
 				// Try to find as image first, then as model
@@ -299,6 +298,44 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 				break;
 			}
 
+			case "plan_map_changes": {
+				const invalidOperations = args.operations
+					.map((operation: any, index: number) => ({ index, tool: operation.tool }))
+					.filter((operation: any) => !batchMutationTools.has(operation.tool));
+				result = { valid: invalidOperations.length === 0, operationCount: args.operations.length, invalidOperations };
+				break;
+			}
+
+			case "apply_map_changes": {
+				const invalidOperations = args.operations.filter((operation: any) => !batchMutationTools.has(operation.tool));
+				if (invalidOperations.length > 0) throw new Error(`Unsupported batch operations: ${invalidOperations.map((operation: any) => operation.tool).join(", ")}`);
+				const snapshot = args.atomic ? toPlain(mapDataStore.$state) : undefined;
+				const results: unknown[] = [];
+				try {
+					for (const operation of args.operations) {
+						results.push(await handleToolInvocation(operation.tool, operation.args));
+					}
+					result = { success: true, operationCount: results.length, results };
+				} catch (error) {
+					if (snapshot) mapDataStore.$patch(snapshot);
+					throw error;
+				}
+				break;
+			}
+
+			case "query_map_items": {
+				const items = mapContentService.listMapItems().filter((item) =>
+					(!args.typeId || item.typeId === args.typeId) &&
+					(args.hasProperty === undefined || item.hasProperty === args.hasProperty) &&
+					(args.minX === undefined || item.x >= args.minX) &&
+					(args.maxX === undefined || item.x <= args.maxX) &&
+					(args.minY === undefined || item.y >= args.minY) &&
+					(args.maxY === undefined || item.y <= args.maxY),
+				);
+				result = { total: items.length, offset: args.offset, limit: args.limit, items: toPlain(items.slice(args.offset, args.offset + args.limit)) };
+				break;
+			}
+
 			// Property Tools
 			case "add_property": {
 				const serviceResult = await mapContentService.addProperty(args);
@@ -318,9 +355,36 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 				break;
 			}
 
+			case "get_property_by_map_item_id": {
+				const mapItem = mapDataStore.findMapItemById(args.mapItemId);
+				if (!mapItem?.property) throw new Error(`Property not found for map item: ${args.mapItemId}`);
+				result = toPlain({ mapItemId: mapItem.id, ...mapItem.property });
+				break;
+			}
+
+			case "list_properties": {
+				result = toPlain(mapDataStore.mapItems
+					.filter((mapItem) => mapItem.property)
+					.map((mapItem) => ({
+						mapItemId: mapItem.id,
+						name: mapItem.property!.name,
+						sellCost: mapItem.property!.sellCost,
+						buildCost: mapItem.property!.buildCost,
+						maxLevel: mapItem.property!.maxLevel,
+					})));
+				break;
+			}
+
 			// Game Setting Tools
+			case "get_game_setting": {
+				const setting = mapDataStore.gameSettingForm.find((entry) => entry.id === args.settingId);
+				if (!setting) throw new Error(`Game setting not found: ${args.settingId}`);
+				result = toPlain(setting);
+				break;
+			}
+
 			case "list_game_settings": {
-				result = toPlain(mapDataStore.gameSettingForm);
+				result = toPlain(mapDataStore.gameSettingForm.map(({ id, key, type, label, defaultValue }) => ({ id, key, type, label, defaultValue })));
 				break;
 			}
 
@@ -369,7 +433,7 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 			}
 
 			case "list_ui_templates": {
-				result = toPlain(mapDataStore.uiTemplates);
+				result = toPlain(mapDataStore.uiTemplates.map(({ id, name, slug }) => ({ id, name, slug })));
 				break;
 			}
 
@@ -431,7 +495,7 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 		}
 
 		case "list_modifier_templates": {
-			result = toPlain(mapDataStore.modifierTemplates);
+			result = toPlain(mapDataStore.modifierTemplates.map(({ effectCode, ...template }) => template));
 			break;
 		}
 
@@ -452,6 +516,12 @@ export async function handleToolInvocation(toolName: MCPToolName, args: any): Pr
 			case "validate_effect_code": {
 				const serviceResult = await mapContentService.validateEffectCode(args);
 				result = toPlain(serviceResult);
+				break;
+			}
+
+			case "validate_map": {
+				const validation = validateMap(mapDataStore.mapItems, mapDataStore.mapEvents, mapDataStore.roles, mapDataStore.mapIndex);
+				result = { ...validation, checkLevel: args.checkLevel ?? "basic" };
 				break;
 			}
 

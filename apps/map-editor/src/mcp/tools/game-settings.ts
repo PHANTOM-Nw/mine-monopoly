@@ -42,6 +42,10 @@ const RemoveGameSettingToolSchema = z.object({
 	settingId: z.string().describe("游戏参数ID"),
 });
 
+const GetGameSettingToolSchema = z.object({
+	settingId: z.string().describe("游戏参数ID"),
+});
+
 const ListGameSettingsToolSchema = z.object({});
 
 /**
@@ -81,6 +85,18 @@ export async function removeGameSetting(args: unknown) {
 }
 
 /**
+ * Get a single game setting field
+ */
+export async function getGameSetting(args: unknown) {
+	try {
+		const result = await invokeTool("get_game_setting", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get game setting");
+	}
+}
+
+/**
  * List all game setting fields
  */
 export async function listGameSettings(args: unknown) {
@@ -96,6 +112,12 @@ export async function listGameSettings(args: unknown) {
  * Export tool definitions for MCP server
  */
 export const gameSettingTools = [
+	{
+		name: "get_game_setting",
+		description: "根据ID获取单个游戏参数字段完整信息。参数：settingId（游戏参数ID）。",
+		inputSchema: GetGameSettingToolSchema,
+		handler: getGameSetting,
+	},
 	{
 		name: "list_game_settings",
 		description: "列出当前地图中所有游戏参数字段。返回每个字段的 id、key、type、label、defaultValue、min、max、placeholder、options 等信息。",
