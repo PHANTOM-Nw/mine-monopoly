@@ -45,6 +45,8 @@ export async function parseGameMapFromProtoFile(filePath: string) {
 	const mapData = JSON.parse(res.jsonData) as GameMap;
 	// 向后兼容：确保所有阶段类型都已初始化（旧地图可能缺少新增的阶段类型）
 	ensureDefaultPhases(mapData);
+	// 从 proto 顶层恢复 serverMapId（旧文件无该字段时为 ""，以 payload 内为准兜底）
+	if (res.serverMapId) mapData.serverMapId = res.serverMapId;
 	return {
 		id: res.id,
 		mapData,
@@ -53,18 +55,7 @@ export async function parseGameMapFromProtoFile(filePath: string) {
 	};
 }
 
-export async function saveGameMapToBinFile(mapId: string, filePath: string, mapData: GameMap): Promise<void> {
-	// 防御：禁止写入目录
-	try {
-		const s = await getFsApi().statPath(filePath);
-		if (s.isDirectory) {
-			throw new Error(`目标路径是目录而非文件: ${filePath}`);
-		}
-	} catch (e: any) {
-		if (e.message?.includes("目录而非文件")) throw e;
-		// statPath 失败（文件不存在等）继续执行
-	}
-
+export async function buildFpmapBuffer(mapId: string, mapData: GameMap): Promise<Uint8Array> {
 	const fetchBuffer = async (url: string): Promise<Uint8Array> => {
 		const response = await fetch(url);
 		if (!response.ok) throw new Error(`资源加载失败: ${url}`);
@@ -97,7 +88,22 @@ export async function saveGameMapToBinFile(mapId: string, filePath: string, mapD
 		imagesList.push(tempImage);
 	}
 	const dataStr = JSON.stringify(mapData);
-	const buffer = dataToProtoBuffer(mapId, dataStr, modelsList, imagesList);
+	return dataToProtoBuffer(mapId, dataStr, modelsList, imagesList, mapData.serverMapId);
+}
+
+export async function saveGameMapToBinFile(mapId: string, filePath: string, mapData: GameMap): Promise<void> {
+	// 防御：禁止写入目录
+	try {
+		const s = await getFsApi().statPath(filePath);
+		if (s.isDirectory) {
+			throw new Error(`目标路径是目录而非文件: ${filePath}`);
+		}
+	} catch (e: any) {
+		if (e.message?.includes("目录而非文件")) throw e;
+		// statPath 失败（文件不存在等）继续执行
+	}
+
+	const buffer = await buildFpmapBuffer(mapId, mapData);
 	await window.electronAPI.saveFile(filePath, buffer);
 }
 
@@ -184,6 +190,7 @@ function ensureBuiltInGameSettings(form: FormSchema[]): FormSchema[] {
 
 export function createDefaultMapData(): GameMap {
 	return {
+		serverMapId: "",
 		id: generateShortId("map", 12),
 		info: {
 			name: "",
@@ -379,12 +386,11 @@ export function convertFpUrlToPath(urlOrPath: string): string {
 	return decodeURIComponent(rawPath);
 }
 
-export async function exportGameMapToProductFile(
+async function buildProductMapBuffer(
 	mapId: string,
-	filePath: string,
 	mapData: GameMap,
 	onProgress?: (stage: string, percent: number) => void
-): Promise<void> {
+): Promise<Uint8Array> {
 	const resourceStore = useResourceStore();
 	const totalResources = resourceStore.models.length + resourceStore.images.length;
 	let loadedResources = 0;
@@ -394,66 +400,65 @@ export async function exportGameMapToProductFile(
 		if (!response.ok) throw new Error(`资源加载失败: ${url}`);
 		const arrayBuffer = await response.arrayBuffer();
 		loadedResources++;
-		// 将资源加载进度映射到 10-30%
-		onProgress?.("加载资源", 10 + Math.floor((loadedResources / totalResources) * 20));
+		onProgress?.("加载资源", totalResources === 0 ? 30 : 10 + Math.floor((loadedResources / totalResources) * 20));
 		return new Uint8Array(arrayBuffer);
 	};
 
 	const modelFiles: ProtoFileType[] = [];
-	// 加载模型:
 	for (const model of resourceStore.models) {
-		const tempModel: ProtoFileType = {
-			id: model.id,
-			name: model.name,
-			filetype: model.fileType,
-			buffer: await fetchBuffer(model.url),
-		};
-		modelFiles.push(tempModel);
+		modelFiles.push({ id: model.id, name: model.name, filetype: model.fileType, buffer: await fetchBuffer(model.url) });
 	}
 
 	const imageFiles: ProtoFileType[] = [];
-	// 加载图片:
 	for (const image of resourceStore.images) {
-		const tempImage: ProtoFileType = {
-			id: image.id,
-			name: image.name,
-			filetype: image.fileType,
-			buffer: await fetchBuffer(image.url),
-		};
-		imageFiles.push(tempImage);
+		imageFiles.push({ id: image.id, name: image.name, filetype: image.fileType, buffer: await fetchBuffer(image.url) });
 	}
 
 	const productData = {
 		mapId,
 		payload: JSON.stringify(mapData),
+		serverMapId: mapData.serverMapId || "",
 		resources: [
 			...modelFiles.map((f) => ({ rid: f.id, label: f.name, ext: f.filetype, blob: f.buffer })),
 			...imageFiles.map((f) => ({ rid: f.id, label: f.name, ext: f.filetype, blob: f.buffer })),
 		],
 	};
 
-	// 编码 protobuf
 	onProgress?.("编码数据", 40);
 	const encoded = encodeProductMap(productData);
 
-	// 压缩数据
 	let dataToEncrypt: Uint8Array;
 	try {
 		onProgress?.("压缩中", 50);
 		dataToEncrypt = await gzipCompress(encoded, (percent) => {
-			// 将 0-100 映射到 50-80
 			onProgress?.("压缩中", 50 + Math.floor(percent * 0.3));
 		});
 		onProgress?.("压缩完成", 80);
 	} catch (error) {
 		console.warn("压缩失败，使用未压缩数据:", error);
-		// 压缩失败时回退到未压缩格式
 		dataToEncrypt = encoded;
 	}
 
-	// 加密并保存
-	onProgress?.("加密并保存", 85);
+	onProgress?.("加密", 85);
 	const encrypted = await encrypt(dataToEncrypt, __MAP_ENCRYPT_KEY__);
-	await window.electronAPI.saveFile(filePath, encrypted);
 	onProgress?.("导出完成", 100);
+	return encrypted;
+}
+
+export async function exportGameMapToProductBuffer(
+	mapId: string,
+	mapData: GameMap,
+	onProgress?: (stage: string, percent: number) => void
+): Promise<Uint8Array> {
+	return buildProductMapBuffer(mapId, mapData, onProgress);
+}
+
+export async function exportGameMapToProductFile(
+	mapId: string,
+	filePath: string,
+	mapData: GameMap,
+	onProgress?: (stage: string, percent: number) => void
+): Promise<void> {
+	const encrypted = await buildProductMapBuffer(mapId, mapData, onProgress);
+	await window.electronAPI.saveFile(filePath, encrypted);
 }

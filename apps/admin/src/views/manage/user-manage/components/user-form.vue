@@ -19,6 +19,7 @@ const formValue = reactive({
 	password: "",
 	color: "#1677ff",
 	isAdmin: false,
+	isCreator: false,
 });
 
 onMounted(() => {
@@ -27,6 +28,7 @@ onMounted(() => {
 		formValue.username = props.user.username;
 		formValue.color = props.user.color;
 		formValue.isAdmin = props.user.isAdmin;
+		formValue.isCreator = props.user.isCreator;
 	}
 });
 
@@ -60,6 +62,7 @@ async function onFinish() {
 				password: encryptedPassword,
 				color: formValue.color,
 				isAdmin: formValue.isAdmin,
+				isCreator: formValue.isCreator,
 			});
 		} else {
 			const encryptedPassword = await getEncryption(formValue.password);
@@ -69,6 +72,7 @@ async function onFinish() {
 				password: encryptedPassword,
 				color: formValue.color,
 				isAdmin: formValue.isAdmin,
+				isCreator: formValue.isCreator,
 			});
 		}
 		emits("finish");
@@ -103,6 +107,11 @@ async function onFinish() {
 			<a-switch v-model:checked="formValue.isAdmin" />
 		</a-form-item>
 
+		<a-form-item label="创作者" name="isCreator">
+			<a-switch v-model:checked="formValue.isCreator" />
+			<div class="form-tip">开启后用户可上传地图（默认获得 1 个地图配额），上传 Key、更多配额与限制请在创作者管理中配置</div>
+		</a-form-item>
+
 		<a-form-item>
 			<a-button style="float: right" type="primary" html-type="submit" :loading="confirmLoading">
 				{{ isEdit ? "保存" : "创建" }}
@@ -112,6 +121,12 @@ async function onFinish() {
 </template>
 
 <style lang="scss" scoped>
+.form-tip {
+	font-size: 12px;
+	color: #999;
+	margin-top: 2px;
+}
+
 .color-input {
 	width: 60px;
 	height: 32px;

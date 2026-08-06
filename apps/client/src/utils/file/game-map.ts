@@ -51,9 +51,12 @@ async function loadFromProductFile(data: Uint8Array, key: string): Promise<{
 		}
 	}
 
+	const mapData = JSON.parse(productMap.payload) as GameMap;
+	mapData.serverMapId = productMap.serverMapId || mapData.serverMapId || "";
+
 	return {
 		id: productMap.mapId,
-		jsonData: productMap.payload,
+		jsonData: JSON.stringify(mapData),
 		modelFiles,
 		imageFiles,
 	};
@@ -113,12 +116,20 @@ export async function loadGameMapFromFile(file: ArrayBuffer) {
 		id: gameMap.id,
 		name: gameMap.info.name,
 		author: gameMap.info.author,
-		version: gameMap.info.version,
+		version: 0,
 		description: gameMap.info.description,
 		hash: "",
 		coverUrl: coverResource.url,
 		mapUrl: "",
 		inuse: true,
+		creatorId: null,
+		status: "published",
+		rejectReason: null,
+		pendingUrl: null,
+		pendingSourceUrl: null,
+		sourceUrl: null,
+		pendingHash: null,
+		pendingVersion: gameMap.info.version,
 	};
 	useLoading().hideLoading();
 	return { gameMap, mapInfo };

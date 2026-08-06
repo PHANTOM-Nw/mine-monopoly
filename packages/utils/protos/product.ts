@@ -11,6 +11,7 @@ export interface ProductMapData {
   mapId: string;
   payload: string;
   resources: ProductResourceItem[];
+  serverMapId?: string;
 }
 
 // Tag bytes: (fieldNumber << 3) | wireType
@@ -18,6 +19,7 @@ export interface ProductMapData {
 const TAG_MAP_ID = (5 << 3) | 2; // 42
 const TAG_PAYLOAD = (8 << 3) | 2; // 66
 const TAG_RESOURCES = (3 << 3) | 2; // 26
+const TAG_SERVER_MAP_ID = (9 << 3) | 2; // 74
 const TAG_RID = (2 << 3) | 2; // 18
 const TAG_LABEL = (6 << 3) | 2; // 50
 const TAG_EXT = (7 << 3) | 2; // 58
@@ -35,12 +37,13 @@ export function encodeProductMap(data: ProductMapData): Uint8Array {
     if (r.blob.length) writer.uint32(TAG_BLOB).bytes(r.blob);
     writer.ldelim();
   }
+  if (data.serverMapId) writer.uint32(TAG_SERVER_MAP_ID).string(data.serverMapId);
   return writer.finish();
 }
 
 export function decodeProductMap(buffer: Uint8Array): ProductMapData {
   const reader = Reader.create(buffer);
-  const data: ProductMapData = { mapId: "", payload: "", resources: [] };
+  const data: ProductMapData = { mapId: "", payload: "", resources: [], serverMapId: "" };
   while (reader.pos < reader.len) {
     const tag = reader.uint32();
     switch (tag >>> 3) {
@@ -49,6 +52,9 @@ export function decodeProductMap(buffer: Uint8Array): ProductMapData {
         break;
       case 8:
         data.payload = reader.string();
+        break;
+      case 9:
+        data.serverMapId = reader.string();
         break;
       case 3: {
         const len = reader.uint32();

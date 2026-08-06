@@ -20,6 +20,8 @@ const AllowPath = {
 		"/static/(.*)",
 		"/game-map/list",
 		"/game-map/info",
+		"/game-map/key/(.*)",
+		"/game-map/status",
 		"/room-router/join",
 		"/room-router/emit-host",
 		"/room-router/delete",

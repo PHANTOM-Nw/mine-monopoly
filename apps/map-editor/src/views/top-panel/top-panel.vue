@@ -9,6 +9,7 @@ import { eventBus } from "@src/utils/event-bus";
 import MCPControlPanel from "@src/components/mcp/MCPControlPanel.vue";
 import ExportProgressDialog from "./export-progress-dialog.vue";
 import VersionPanel from "@src/components/version-panel/VersionPanel.vue";
+import UploadMapDialog from "./UploadMapDialog.vue";
 
 const editorStore = useEditorStore();
 const versionStore = useVersionStore();
@@ -33,6 +34,7 @@ onUnmounted(() => {
 const exportProgressVisible = ref(false);
 const exportProgressPercent = ref(0);
 const exportProgressStage = ref("");
+const uploadMapVisible = ref(false);
 
 function getDistFpmapHint(distFpmapPath?: string) {
 	if (!distFpmapPath) return "保存成功";
@@ -40,7 +42,7 @@ function getDistFpmapHint(distFpmapPath?: string) {
 }
 
 // 文件下拉菜单项点击处理
-type FileMenuKey = "new" | "open-project" | "open-fpmap" | "save" | "saveas" | "export-fpmap" | "exportmmmap";
+type FileMenuKey = "new" | "open-project" | "open-fpmap" | "save" | "saveas" | "export-fpmap" | "exportmmmap" | "upload-map";
 async function handleFileMenuClick({ key }: { key: FileMenuKey }) {
 	switch (key) {
 		case "new":
@@ -64,6 +66,9 @@ async function handleFileMenuClick({ key }: { key: FileMenuKey }) {
 			break;
 		case "exportmmmap":
 			handleExportMmmapFile();
+			break;
+		case "upload-map":
+			uploadMapVisible.value = true;
 			break;
 	}
 }
@@ -351,6 +356,8 @@ function handleReloadMap() {
 						<a-menu-divider />
 						<a-menu-item key="export-fpmap">导出 .fpmap</a-menu-item>
 						<a-menu-item key="exportmmmap">导出 .mmmap</a-menu-item>
+						<a-menu-divider />
+						<a-menu-item key="upload-map">上传地图</a-menu-item>
 					</a-menu>
 				</template>
 			</a-dropdown>
@@ -403,6 +410,7 @@ function handleReloadMap() {
 	</div>
 	<MCPControlPanel ref="mcpPanelRef" v-model="mcpPanelVisible" />
 	<VersionPanel v-model:open="versionStore.panelVisible" />
+	<UploadMapDialog v-model:open="uploadMapVisible" />
 	<ExportProgressDialog
 		v-model:open="exportProgressVisible"
 		:percent="exportProgressPercent"

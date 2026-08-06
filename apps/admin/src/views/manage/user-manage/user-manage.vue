@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { AdminUserListItem } from "@/interfaces/interfaces";
 import { computed, onMounted, ref } from "vue";
-import { getUserList, deleteUser } from "@/utils/api/user";
+import { deleteUser, getUserList } from "@/utils/api/user";
 import { isMobileDevice } from "@/utils/index";
+import { message } from "ant-design-vue";
 import UserForm from "./components/user-form.vue";
+import CreatorManageModal from "./components/creator-manage-modal.vue";
 
 const isMobile = isMobileDevice();
 const userList = ref<AdminUserListItem[]>([]);
@@ -18,16 +20,18 @@ const avatarPreviewVisible = ref(false);
 const previewUser = ref<AdminUserListItem | undefined>();
 const avatarLoadFailedIds = ref<string[]>([]);
 const onlineFilter = ref<"all" | "online" | "offline">("all");
-const adminFilter = ref<"all" | "admin" | "normal">("all");
+const roleFilter = ref<"all" | "admin" | "creator" | "normal">("all");
 const sortBy = ref<"createTime" | "lastActiveTime" | "username" | "useraccount">("lastActiveTime");
 const sortOrder = ref<"ASC" | "DESC">("DESC");
+const creatorManageVisible = ref(false);
+const creatorManageUser = ref<AdminUserListItem | undefined>();
 
 const columns = [
 	{ title: "头像", dataIndex: "avatar", key: "avatar", align: "center" as const },
 	{ title: "账号", dataIndex: "useraccount", key: "useraccount", align: "center" as const },
 	{ title: "用户名", dataIndex: "username", key: "username", align: "center" as const },
 	{ title: "在线", dataIndex: "online", key: "online", align: "center" as const },
-	{ title: "管理员", dataIndex: "isAdmin", key: "isAdmin", align: "center" as const },
+	{ title: "身份", key: "identity", align: "center" as const },
 	{ title: "创建时间", dataIndex: "createTime", key: "createTime", align: "center" as const },
 	{ title: "近期登录", dataIndex: "lastActiveTime", key: "lastActiveTime", align: "center" as const },
 	{ title: "操作", key: "action", align: "center" as const },
@@ -39,9 +43,10 @@ const onlineOptions = [
 	{ label: "仅离线", value: "offline" },
 ];
 
-const adminOptions = [
+const roleOptions = [
 	{ label: "全部角色", value: "all" },
 	{ label: "仅管理员", value: "admin" },
+	{ label: "仅创作者", value: "creator" },
 	{ label: "普通用户", value: "normal" },
 ];
 
@@ -67,7 +72,8 @@ async function updateList() {
 		const data = await getUserList(currentPage.value, pageSize.value, {
 			search: searchText.value || undefined,
 			online: onlineFilter.value === "all" ? undefined : onlineFilter.value === "online",
-			isAdmin: adminFilter.value === "all" ? undefined : adminFilter.value === "admin",
+			isAdmin: roleFilter.value === "all" || roleFilter.value === "creator" ? undefined : roleFilter.value === "admin",
+			isCreator: roleFilter.value === "all" || roleFilter.value === "admin" ? undefined : roleFilter.value === "creator",
 			sortBy: sortBy.value,
 			sortOrder: sortOrder.value,
 		});
@@ -121,6 +127,23 @@ async function handleDelete(id: string) {
 	await updateList();
 }
 
+function openCreatorManage(user: AdminUserListItem) {
+	creatorManageUser.value = user;
+	creatorManageVisible.value = true;
+}
+
+function handleCreatorManageClose() {
+	creatorManageUser.value = undefined;
+}
+
+async function handleCreatorManageChange() {
+	// 弹窗内 key/审核操作改变了用户数据，刷新列表并同步弹窗内用户引用
+	await updateList();
+	if (creatorManageUser.value) {
+		creatorManageUser.value = userList.value.find((u) => u.id === creatorManageUser.value?.id) ?? creatorManageUser.value;
+	}
+}
+
 function openAvatarPreview(user: AdminUserListItem) {
 	previewUser.value = user;
 	avatarPreviewVisible.value = true;
@@ -156,14 +179,9 @@ onMounted(() => {
 					@change="(e: Event) => handleSearch((e.target as HTMLInputElement).value)"
 				/>
 				<a-select v-model:value="onlineFilter" class="filter-select" :options="onlineOptions" @change="handleFilterChange" />
-				<a-select v-model:value="adminFilter" class="filter-select" :options="adminOptions" @change="handleFilterChange" />
+				<a-select v-model:value="roleFilter" class="filter-select" :options="roleOptions" @change="handleFilterChange" />
 				<a-select v-model:value="sortBy" class="filter-select" :options="sortFieldOptions" @change="handleFilterChange" />
-				<a-select
-					v-model:value="sortOrder"
-					class="filter-select short"
-					:options="sortOrderOptions"
-					@change="handleFilterChange"
-				/>
+				<a-select v-model:value="sortOrder" class="filter-select short" :options="sortOrderOptions" @change="handleFilterChange" />
 			</div>
 			<div class="right">
 				<a-button type="primary" @click="handleCreate">新增用户</a-button>
@@ -175,52 +193,33 @@ onMounted(() => {
 				:columns="columns"
 				:data-source="userList"
 				:loading="tableLoading"
-				:pagination="{
-					current: currentPage,
-					pageSize: pageSize,
-					total: total,
-					showTotal: (total: number) => `${total} 个用户`,
-					onChange: handlePageChange,
-					showLessItems: true,
-				}"
+				:pagination="{ current: currentPage, pageSize, total, showTotal: (t: number) => `${t} 个用户`, onChange: handlePageChange, showLessItems: true }"
 				row-key="id"
 			>
 				<template #bodyCell="{ column, record }">
 					<template v-if="column.key === 'avatar'">
 						<button class="avatar-button" type="button" @click="openAvatarPreview(record)">
-							<div v-if="record.avatar" class="avatar-wrapper">
-								<img
-									class="avatar-image"
-									:src="record.avatar"
-									:alt="`${record.username} avatar`"
-									:style="{ border: `2px solid ${record.color}` }"
-									@error="markAvatarLoadFailed(record.id)"
-								/>
-								<span v-if="hasAvatarLoadFailed(record.id)" class="avatar-flag">异常</span>
-							</div>
-							<div v-else class="avatar-circle" :style="{ backgroundColor: record.color }">
-								{{ record.username?.charAt(0) }}
-							</div>
+							<img v-if="record.avatar" class="avatar-image" :src="record.avatar" :alt="`${record.username} avatar`" :style="{ border: `2px solid ${record.color}` }" @error="markAvatarLoadFailed(record.id)" />
+							<div v-else class="avatar-circle" :style="{ backgroundColor: record.color }">{{ record.username?.charAt(0) }}</div>
 						</button>
 					</template>
 					<template v-if="column.key === 'online'">
-						<a-tag :color="record.online ? 'green' : 'default'">
-							{{ record.online ? "在线" : "离线" }}
-						</a-tag>
+						<a-tag :color="record.online ? 'green' : 'default'">{{ record.online ? "在线" : "离线" }}</a-tag>
 					</template>
-					<template v-if="column.key === 'isAdmin'">
-						<a-tag v-if="record.isAdmin" color="blue">管理员</a-tag>
-						<a-tag v-if="hasAvatarLoadFailed(record.id)" color="red">头像异常</a-tag>
+					<template v-if="column.key === 'identity'">
+						<a-space wrap>
+							<a-tag v-if="record.isAdmin" color="blue">管理员</a-tag>
+							<a-tag v-if="record.isCreator" color="green">创作者</a-tag>
+							<a-tag v-if="!record.isAdmin && !record.isCreator" color="default">普通</a-tag>
+							<a-tag v-if="hasAvatarLoadFailed(record.id)" color="red">头像异常</a-tag>
+						</a-space>
 					</template>
-					<template v-if="column.key === 'createTime'">
-						<span class="time-text">{{ formatDateTime(record.createTime) }}</span>
-					</template>
-					<template v-if="column.key === 'lastActiveTime'">
-						<span class="time-text">{{ formatDateTime(record.lastActiveTime) }}</span>
-					</template>
+					<template v-if="column.key === 'createTime'"><span class="time-text">{{ formatDateTime(record.createTime) }}</span></template>
+					<template v-if="column.key === 'lastActiveTime'"><span class="time-text">{{ formatDateTime(record.lastActiveTime) }}</span></template>
 					<template v-if="column.key === 'action'">
-						<a-space>
+						<a-space wrap>
 							<a-button type="link" size="small" @click="handleEdit(record)">编辑</a-button>
+							<a-button v-if="record.isCreator" type="link" size="small" @click="openCreatorManage(record)">创作者管理</a-button>
 							<a-popconfirm title="确认删除该用户？" @confirm="handleDelete(record.id)">
 								<a-button type="link" danger size="small">删除</a-button>
 							</a-popconfirm>
@@ -235,37 +234,24 @@ onMounted(() => {
 			<div v-for="user in userList" :key="user.id" class="user-card">
 				<div class="user-card-header">
 					<button class="avatar-button" type="button" @click="openAvatarPreview(user)">
-						<div v-if="user.avatar" class="avatar-wrapper">
-							<img
-								class="avatar-image"
-								:src="user.avatar"
-								:alt="`${user.username} avatar`"
-								:style="{ border: `2px solid ${user.color}` }"
-								@error="markAvatarLoadFailed(user.id)"
-							/>
-							<span v-if="hasAvatarLoadFailed(user.id)" class="avatar-flag">异常</span>
-						</div>
-						<div v-else class="avatar-circle" :style="{ backgroundColor: user.color }">
-							{{ user.username?.charAt(0) }}
-						</div>
+						<img v-if="user.avatar" class="avatar-image" :src="user.avatar" :alt="`${user.username} avatar`" :style="{ border: `2px solid ${user.color}` }" @error="markAvatarLoadFailed(user.id)" />
+						<div v-else class="avatar-circle" :style="{ backgroundColor: user.color }">{{ user.username?.charAt(0) }}</div>
 					</button>
 					<div class="user-card-info">
 						<span class="user-card-name">{{ user.username }}</span>
 						<span class="user-card-account">{{ user.useraccount }}</span>
-						<span class="user-card-time">创建: {{ formatDateTime(user.createTime) }}</span>
-						<span class="user-card-time">近期登录: {{ formatDateTime(user.lastActiveTime) }}</span>
+						<span class="user-card-time">
+							<a-tag v-if="user.isAdmin" color="blue">管理员</a-tag>
+							<a-tag v-if="user.isCreator" color="green">创作者</a-tag>
+							<a-tag v-if="!user.isAdmin && !user.isCreator" color="default">普通</a-tag>
+						</span>
 					</div>
-					<a-tag :color="user.online ? 'green' : 'default'" class="user-card-tag">
-						{{ user.online ? "在线" : "离线" }}
-					</a-tag>
+					<a-tag :color="user.online ? 'green' : 'default'">{{ user.online ? "在线" : "离线" }}</a-tag>
 				</div>
 				<div class="user-card-footer">
-					<div class="user-card-badges">
-						<a-tag v-if="user.isAdmin" color="blue">管理员</a-tag>
-						<a-tag v-if="hasAvatarLoadFailed(user.id)" color="red">头像异常</a-tag>
-					</div>
-					<a-space>
+					<a-space wrap>
 						<a-button type="link" size="small" @click="handleEdit(user)">编辑</a-button>
+						<a-button v-if="user.isCreator" type="link" size="small" @click="openCreatorManage(user)">创作者管理</a-button>
 						<a-popconfirm title="确认删除该用户？" @confirm="handleDelete(user.id)">
 							<a-button type="link" danger size="small">删除</a-button>
 						</a-popconfirm>
@@ -273,53 +259,34 @@ onMounted(() => {
 				</div>
 			</div>
 			<div class="user-card-pagination">
-				<a-pagination
-					show-less-items
-					v-model:current="currentPage"
-					:total="total"
-					:pageSize="pageSize"
-					@change="handlePageChange"
-				/>
+				<a-pagination show-less-items v-model:current="currentPage" :total="total" :pageSize="pageSize" @change="handlePageChange" />
 			</div>
 		</div>
 	</div>
 
-	<a-modal
-		@close="handleFormClose"
-		destroyOnClose
-		:title="currentUser ? '编辑用户' : '新增用户'"
-		:width="'min(420px, 90vw)'"
-		v-model:open="formVisible"
-		:footer="null"
-	>
+	<a-modal @close="handleFormClose" destroyOnClose :title="currentUser ? '编辑用户' : '新增用户'" :width="'min(420px, 90vw)'" v-model:open="formVisible" :footer="null">
 		<UserForm :user="currentUser" @finish="handleFormFinish" />
 	</a-modal>
 
 	<a-modal v-model:open="avatarPreviewVisible" :title="previewTitle" :footer="null" width="420px">
 		<div v-if="previewUser" class="avatar-preview">
-			<div v-if="previewUser.avatar" class="preview-image-wrapper">
-				<img
-					class="preview-image"
-					:src="previewUser.avatar"
-					:alt="`${previewUser.username} avatar`"
-					@error="markAvatarLoadFailed(previewUser.id)"
-				/>
-				<div v-if="hasAvatarLoadFailed(previewUser.id)" class="preview-error">
-					头像加载失败，可能已被 COS 拦截
-				</div>
-			</div>
-			<div v-else class="avatar-circle preview-fallback" :style="{ backgroundColor: previewUser.color }">
-				{{ previewUser.username?.charAt(0) }}
-			</div>
+			<img v-if="previewUser.avatar" class="preview-image" :src="previewUser.avatar" :alt="`${previewUser.username} avatar`" @error="markAvatarLoadFailed(previewUser.id)" />
+			<div v-else class="avatar-circle preview-fallback" :style="{ backgroundColor: previewUser.color }">{{ previewUser.username?.charAt(0) }}</div>
 			<div class="preview-meta">
 				<div><span class="meta-label">账号</span>{{ previewUser.useraccount }}</div>
 				<div><span class="meta-label">用户名</span>{{ previewUser.username }}</div>
-				<div v-if="hasAvatarLoadFailed(previewUser.id)" class="meta-warning">该头像当前无法加载，可能为违规资源或已失效</div>
 				<div><span class="meta-label">创建时间</span>{{ formatDateTime(previewUser.createTime) }}</div>
 				<div><span class="meta-label">近期登录</span>{{ formatDateTime(previewUser.lastActiveTime) }}</div>
 			</div>
 		</div>
 	</a-modal>
+
+	<CreatorManageModal
+		v-model:open="creatorManageVisible"
+		:user="creatorManageUser"
+		@change="handleCreatorManageChange"
+		@update:open="handleCreatorManageClose"
+	/>
 </template>
 
 <style lang="scss" scoped>
@@ -347,19 +314,9 @@ onMounted(() => {
 			gap: 10px;
 		}
 
-		.search-input {
-			flex: 1;
-			min-width: 220px;
-			max-width: 320px;
-		}
-
-		.filter-select {
-			width: 130px;
-		}
-
-		.filter-select.short {
-			width: 100px;
-		}
+		.search-input { flex: 1; min-width: 220px; max-width: 320px; }
+		.filter-select { width: 130px; }
+		.filter-select.short { width: 100px; }
 	}
 
 	.user-list-container {
@@ -369,189 +326,28 @@ onMounted(() => {
 		border-radius: 5px;
 		padding: 10px;
 	}
-
-	.avatar-button {
-		border: none;
-		padding: 0;
-		background: transparent;
-		cursor: pointer;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.avatar-circle {
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: #fff;
-		font-size: 16px;
-		font-weight: bold;
-	}
-
-	.avatar-wrapper {
-		position: relative;
-		width: 40px;
-		height: 40px;
-	}
-
-	.avatar-image {
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		object-fit: cover;
-		display: block;
-		background: #f3f3f3;
-	}
-
-	.avatar-flag {
-		position: absolute;
-		right: -6px;
-		bottom: -4px;
-		padding: 1px 4px;
-		border-radius: 999px;
-		background: #ff4d4f;
-		color: #fff;
-		font-size: 10px;
-		line-height: 1.2;
-		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-	}
-
-	.time-text {
-		color: #444;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.user-card-list {
-		flex: 1;
-		overflow-y: auto;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		margin-top: 10px;
-
-		.user-card {
-			background: #fff;
-			border-radius: 5px;
-			padding: 12px 16px;
-
-			.user-card-header {
-				display: flex;
-				align-items: center;
-				gap: 12px;
-
-				.user-card-info {
-					flex: 1;
-					display: flex;
-					flex-direction: column;
-					gap: 2px;
-
-					.user-card-name {
-						font-weight: bold;
-						color: #333;
-					}
-
-					.user-card-account {
-						font-size: 12px;
-						color: #999;
-					}
-
-					.user-card-time {
-						font-size: 12px;
-						color: #666;
-						font-variant-numeric: tabular-nums;
-					}
-				}
-			}
-
-			.user-card-footer {
-				display: flex;
-				justify-content: space-between;
-				align-items: center;
-				margin-top: 10px;
-				padding-top: 10px;
-				border-top: 1px solid #f0f0f0;
-			}
-		}
-
-		.user-card-pagination {
-			display: flex;
-			justify-content: center;
-			padding: 10px 0;
-		}
-	}
 }
 
-.avatar-preview {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: 16px;
-
-	.preview-image-wrapper {
-		width: 220px;
-	}
-
-	.preview-image {
-		width: 220px;
-		height: 220px;
-		border-radius: 16px;
-		overflow: hidden;
-		object-fit: cover;
-		display: block;
-		background: #f5f5f5;
-	}
-
-	.preview-fallback {
-		width: 140px;
-		height: 140px;
-		font-size: 48px;
-	}
-
-	.preview-meta {
-		width: 100%;
-		display: grid;
-		gap: 10px;
-		font-variant-numeric: tabular-nums;
-
-		.meta-label {
-			display: inline-block;
-			width: 80px;
-			color: #888;
-		}
-
-		.meta-warning {
-			color: #cf1322;
-			background: #fff1f0;
-			border: 1px solid #ffa39e;
-			border-radius: 8px;
-			padding: 8px 10px;
-		}
-	}
-
-	.preview-error {
-		margin-top: 10px;
-		color: #cf1322;
-		font-size: 12px;
-		text-align: center;
-	}
-}
+.avatar-button { border: none; padding: 0; background: transparent; cursor: pointer; }
+.avatar-circle { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; }
+.avatar-image { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; display: block; background: #f3f3f3; }
+.time-text { color: #444; font-variant-numeric: tabular-nums; }
+.user-card-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.user-card { background: #fff; border-radius: 5px; padding: 12px 16px; }
+.user-card-header { display: flex; align-items: center; gap: 12px; }
+.user-card-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.user-card-name { font-weight: bold; color: #333; }
+.user-card-account, .user-card-time { font-size: 12px; color: #666; }
+.user-card-footer { display: flex; justify-content: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0; }
+.user-card-pagination { display: flex; justify-content: center; padding: 10px 0; }
+.avatar-preview { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.preview-image { width: 220px; height: 220px; border-radius: 16px; object-fit: cover; background: #f5f5f5; }
+.preview-fallback { width: 140px; height: 140px; font-size: 48px; }
+.preview-meta { width: 100%; display: grid; gap: 10px; font-variant-numeric: tabular-nums; }
+.meta-label { display: inline-block; width: 80px; color: #888; }
 
 @media (max-width: 768px) {
-	.user-page {
-		.top-bar {
-			padding: 12px;
-			align-items: stretch;
-			flex-direction: column;
-		}
-
-		.right {
-			display: flex;
-			justify-content: flex-end;
-		}
-	}
+	.user-page .top-bar { padding: 12px; align-items: stretch; flex-direction: column; }
+	.user-page .right { display: flex; justify-content: flex-end; }
 }
 </style>

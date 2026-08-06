@@ -17,12 +17,15 @@ import { coturnRouter } from "#src/routers/coturn-router";
 import { statisticsRouter } from "#src/routers/statistics-router";
 import { env } from "@mine-monopoly/env";
 import { User } from "#src/db/entities/User";
+import { publishExistingInUseMaps } from "#src/db/api/game-map";
+import { migrateCreatorFlags } from "#src/db/api/user";
 
 async function bootstrap() {
 	try {
-		await AppDataSource.initialize().then(() => {
-			serverLog(`${chalk.bold.bgGreen(" 数据库连接成功 ")}`);
-		});
+		await AppDataSource.initialize();
+		serverLog(`${chalk.bold.bgGreen(" 数据库连接成功 ")}`);
+		await publishExistingInUseMaps();
+		await migrateCreatorFlags();
 
 		const app = express();
 

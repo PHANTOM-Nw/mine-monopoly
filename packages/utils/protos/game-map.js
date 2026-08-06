@@ -17,6 +17,7 @@ export const GameMap = $root.GameMap = (() => {
      * @property {string|null} [jsonData] GameMap jsonData
      * @property {Array.<IModelItem>|null} [modelFiles] GameMap modelFiles
      * @property {Array.<IImageItem>|null} [imageFiles] GameMap imageFiles
+     * @property {string|null} [serverMapId] GameMap serverMapId
      */
 
     /**
@@ -69,6 +70,14 @@ export const GameMap = $root.GameMap = (() => {
     GameMap.prototype.imageFiles = $util.emptyArray;
 
     /**
+     * GameMap serverMapId.
+     * @member {string} serverMapId
+     * @memberof GameMap
+     * @instance
+     */
+    GameMap.prototype.serverMapId = "";
+
+    /**
      * Creates a new GameMap instance using the specified properties.
      * @function create
      * @memberof GameMap
@@ -102,6 +111,8 @@ export const GameMap = $root.GameMap = (() => {
         if (message.imageFiles != null && message.imageFiles.length)
             for (let i = 0; i < message.imageFiles.length; ++i)
                 $root.ImageItem.encode(message.imageFiles[i], writer.uint32(/* id 4, wireType 2 =*/34).fork()).ldelim();
+        if (message.serverMapId != null && Object.hasOwnProperty.call(message, "serverMapId"))
+            writer.uint32(/* id 5, wireType 2 =*/42).string(message.serverMapId);
         return writer;
     };
 
@@ -156,6 +167,10 @@ export const GameMap = $root.GameMap = (() => {
                     if (!(message.imageFiles && message.imageFiles.length))
                         message.imageFiles = [];
                     message.imageFiles.push($root.ImageItem.decode(reader, reader.uint32()));
+                    break;
+                }
+            case 5: {
+                    message.serverMapId = reader.string();
                     break;
                 }
             default:
@@ -256,6 +271,8 @@ export const GameMap = $root.GameMap = (() => {
                 message.imageFiles[i] = $root.ImageItem.fromObject(object.imageFiles[i]);
             }
         }
+        if (object.serverMapId != null)
+            message.serverMapId = String(object.serverMapId);
         return message;
     };
 
@@ -279,6 +296,7 @@ export const GameMap = $root.GameMap = (() => {
         if (options.defaults) {
             object.id = "";
             object.jsonData = "";
+            object.serverMapId = "";
         }
         if (message.id != null && message.hasOwnProperty("id"))
             object.id = message.id;
@@ -294,6 +312,8 @@ export const GameMap = $root.GameMap = (() => {
             for (let j = 0; j < message.imageFiles.length; ++j)
                 object.imageFiles[j] = $root.ImageItem.toObject(message.imageFiles[j], options);
         }
+        if (message.serverMapId != null && message.hasOwnProperty("serverMapId"))
+            object.serverMapId = message.serverMapId;
         return object;
     };
 

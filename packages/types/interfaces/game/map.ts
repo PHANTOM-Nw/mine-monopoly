@@ -17,6 +17,9 @@ export interface GameMap {
 	/** 地图唯一标识 */
 	id: string;
 
+	/** 服务端地图 ID（用户上传审核流使用） */
+	serverMapId?: string;
+
 	/** 地图基本信息 */
 	info: GameMapInfo;
 

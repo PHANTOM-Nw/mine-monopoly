@@ -11,7 +11,8 @@ export function dataToProtoBuffer(
 	id: string,
 	jsonData: string,
 	modelFiles: ProtoFileType[],
-	imageFiles: ProtoFileType[]
+	imageFiles: ProtoFileType[],
+	serverMapId?: string
 ): Uint8Array {
 	const modelFileItems = modelFiles.map((f) => ({
 		id: f.id,
@@ -32,6 +33,7 @@ export function dataToProtoBuffer(
 		jsonData,
 		modelFiles: modelFileItems,
 		imageFiles: imageFileItems,
+		serverMapId: serverMapId || "",
 	});
 
 	const buffer = GameMap.encode(message).finish();
@@ -40,7 +42,7 @@ export function dataToProtoBuffer(
 
 export async function loadFromProto(
 	buffer: Uint8Array
-): Promise<{ id: string; jsonData: string; modelFiles: ProtoFileType[]; imageFiles: ProtoFileType[] }> {
+): Promise<{ id: string; jsonData: string; modelFiles: ProtoFileType[]; imageFiles: ProtoFileType[]; serverMapId: string }> {
 	const decoded = GameMap.decode(new Uint8Array(buffer));
 
 	const modelFiles: ProtoFileType[] = (decoded.modelFiles || []).map((f: any) => ({
@@ -62,6 +64,7 @@ export async function loadFromProto(
 		jsonData: decoded.jsonData,
 		modelFiles,
 		imageFiles,
+		serverMapId: decoded.serverMapId || "",
 	};
 }
 
