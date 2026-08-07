@@ -2,7 +2,7 @@ import { GameMap, GameMapInDb, Role } from "@mine-monopoly/types";
 import { loadFromProto, ProtoFileType, decodeProductMap, gzipDecompress, normalizeGameMap } from "@mine-monopoly/utils";
 import { isProductFile, decrypt } from "@mine-monopoly/utils/crypto";
 import { env } from "@mine-monopoly/env";
-import { useLoading } from "@src/store";
+import { useLoading, useSettig } from "@src/store";
 import { getGameMapById } from "../api/map";
 import { useMapData, useResourceStore } from "@src/store/game";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
@@ -64,9 +64,28 @@ async function loadFromProductFile(data: Uint8Array, key: string): Promise<{
 
 export async function getGameMap(gameMapInfo: GameMapInDb) {
 	const encryptKey = env("MAP_ENCRYPT_KEY", "");
+	const platform = window.platformAPI;
 
-	const response = await fetch(gameMapInfo.mapUrl);
-	const arrayBuffer = await response.arrayBuffer();
+	let arrayBuffer: ArrayBuffer;
+	if (platform?.loadMapCache && platform?.saveMapCache && gameMapInfo.hash) {
+		// Electron 平台：优先命中本地缓存；未命中则下载并写回缓存
+		// （hash 为空时跳过缓存，避免不同版本地图串用）
+		const cached = await platform.loadMapCache(gameMapInfo.id, gameMapInfo.hash);
+		if (cached) {
+			arrayBuffer = cached;
+		} else {
+			const response = await fetch(gameMapInfo.mapUrl);
+			arrayBuffer = await response.arrayBuffer();
+			// 读取用户设置的最大缓存（幂等：从 localStorage 同步最新值）
+			useSettig().initMapCacheMaxSize();
+			const maxSizeBytes = useSettig().mapCacheMaxSizeMB * 1024 * 1024;
+			await platform.saveMapCache(gameMapInfo.id, gameMapInfo.hash, arrayBuffer, maxSizeBytes);
+		}
+	} else {
+		const response = await fetch(gameMapInfo.mapUrl);
+		arrayBuffer = await response.arrayBuffer();
+	}
+
 	const bytes = new Uint8Array(arrayBuffer);
 	// Detect format: .mmmap (encrypted product file) or .fpmap (legacy)
 	if (isProductFile(bytes)) {

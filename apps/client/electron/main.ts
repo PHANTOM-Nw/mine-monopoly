@@ -596,54 +596,163 @@ ipcMain.handle("open-external", async (_event, targetUrl: string) => {
 
 const cacheDir = path.join(app.getPath("userData"), "map-cache");
 const indexFile = path.join(cacheDir, "index.json");
-type IndexData = Record<string, string>;
+/** 默认最大缓存容量 500MB */
+const DEFAULT_MAX_CACHE_SIZE = 500 * 1024 * 1024;
 
-async function loadIndex(): Promise<IndexData> {
+/** index.json 条目：hash + 最后使用时间戳（用于 LRU 淘汰） */
+interface CacheIndexEntry {
+	hash: string;
+	lastUsed: number;
+}
+type CacheIndex = Record<string, CacheIndexEntry>;
+
+/**
+ * 缓存键（mapId / hash）白名单校验：仅允许字母数字与 -_，且拒绝原型链危险键。
+ * 防止通过 IPC 传入的 mapId/hash 拼入文件路径造成目录逃逸或原型污染。
+ */
+function isValidCacheKey(key: string): boolean {
+	return /^[A-Za-z0-9_-]{1,128}$/.test(key) && key !== "__proto__" && key !== "constructor" && key !== "prototype";
+}
+
+async function loadIndex(): Promise<CacheIndex> {
 	try {
 		const raw = await fs.readFile(indexFile, "utf-8");
-		return JSON.parse(raw) as IndexData;
+		const parsed = JSON.parse(raw) as Record<string, string | CacheIndexEntry>;
+		// 兼容旧格式：{ mapId: hash }（无 lastUsed），迁移为条目结构。
+		// 使用无原型对象组装，杜绝 "__proto__" 等键触发原型污染。
+		const index: CacheIndex = Object.create(null) as CacheIndex;
+		for (const [mapId, value] of Object.entries(parsed)) {
+			if (!isValidCacheKey(mapId)) continue;
+			if (typeof value === "string") {
+				if (isValidCacheKey(value)) index[mapId] = { hash: value, lastUsed: 0 };
+			} else if (value && typeof value === "object" && typeof value.hash === "string" && isValidCacheKey(value.hash)) {
+				index[mapId] = {
+					hash: value.hash,
+					lastUsed: typeof value.lastUsed === "number" ? value.lastUsed : 0,
+				};
+			}
+		}
+		return index;
 	} catch {
-		return {};
+		return Object.create(null) as CacheIndex;
 	}
 }
 
-ipcMain.handle("map-cache:save", async (_event, mapId: string, hash: string, buffer: ArrayBuffer) => {
+async function saveIndex(index: CacheIndex) {
+	await fs.writeFile(indexFile, JSON.stringify(index, null, 2), "utf-8");
+}
+
+/** 统计缓存目录中 .bin 文件的总大小与数量 */
+async function getCacheSize(): Promise<{ size: number; count: number }> {
+	let size = 0;
+	let count = 0;
+	try {
+		const entries = await fs.readdir(cacheDir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".bin")) continue;
+			const stat = await fs.stat(path.join(cacheDir, entry.name)).catch(() => null);
+			if (stat) {
+				size += stat.size;
+				count += 1;
+			}
+		}
+	} catch {
+		// 目录不存在视为空缓存
+	}
+	return { size, count };
+}
+
+/** LRU 淘汰：按 lastUsed 升序删除缓存项，直到总大小低于 maxSizeBytes */
+async function enforceCacheLimit(index: CacheIndex, maxSizeBytes: number) {
+	const { size } = await getCacheSize();
+	if (size <= maxSizeBytes) return;
+
+	// lastUsed 为 0 的旧格式条目优先淘汰
+	const entries = Object.entries(index).sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+	for (const [mapId, entry] of entries) {
+		const filePath = path.join(cacheDir, `${mapId}-${entry.hash}.bin`);
+		await fs.rm(filePath, { force: true }).catch(() => {});
+		delete index[mapId];
+		const { size: currentSize } = await getCacheSize();
+		if (currentSize <= maxSizeBytes) break;
+	}
+	await saveIndex(index);
+}
+
+ipcMain.handle("map-cache:save", async (_event, mapId: string, hash: string, buffer: ArrayBuffer, maxSizeBytes?: number) => {
+	// hash 为空无法校验版本，不缓存（避免不同版本地图串用）；同时白名单校验防路径逃逸
+	if (!isValidCacheKey(mapId) || !isValidCacheKey(hash)) return;
+
+	// 容量上限钳制：非法值（NaN/Infinity/<=0）回退默认 500MB，超 10GB 硬顶
+	const MAX_CACHE_LIMIT = 10240 * 1024 * 1024; // 与设置面板上限一致（10GB）
+	const limit =
+		Number.isFinite(maxSizeBytes) && maxSizeBytes! > 0
+			? Math.min(maxSizeBytes!, MAX_CACHE_LIMIT)
+			: DEFAULT_MAX_CACHE_SIZE;
+	// 单文件超过容量上限则缓存无意义，直接拒绝（防止一次写入撑爆磁盘）
+	if (!buffer || buffer.byteLength <= 0 || buffer.byteLength > limit) return;
+
 	async function ensureCacheDir() {
 		await fs.mkdir(cacheDir, { recursive: true });
 	}
 
-	async function saveIndex(index: IndexData) {
-		await fs.writeFile(indexFile, JSON.stringify(index, null, 2), "utf-8");
-	}
-
 	await ensureCacheDir();
 	const index = await loadIndex();
-	const oldHash = index[mapId];
+	const oldEntry = index[mapId];
 
 	// 删除旧文件
-	if (oldHash && oldHash !== hash) {
-		const oldFilePath = path.join(cacheDir, `${mapId}-${oldHash}.bin`);
+	if (oldEntry && oldEntry.hash !== hash) {
+		const oldFilePath = path.join(cacheDir, `${mapId}-${oldEntry.hash}.bin`);
 		await fs.rm(oldFilePath, { force: true }).catch(() => {});
 	}
 
 	const filePath = path.join(cacheDir, `${mapId}-${hash}.bin`);
 	await fs.writeFile(filePath, new Uint8Array(buffer));
 
-	index[mapId] = hash;
+	index[mapId] = { hash, lastUsed: Date.now() };
 	await saveIndex(index);
+
+	// 容量管理（未传时使用默认 500MB）
+	await enforceCacheLimit(index, limit);
 });
 
 ipcMain.handle("map-cache:load", async (_event, mapId: string, hash: string) => {
+	if (!isValidCacheKey(mapId) || !isValidCacheKey(hash)) return undefined;
 	const index = await loadIndex();
-	if (index[mapId] !== hash) return undefined;
+	const entry = index[mapId];
+	if (!entry || entry.hash !== hash) return undefined;
 
 	const filePath = path.join(cacheDir, `${mapId}-${hash}.bin`);
 	try {
 		const buf = await fs.readFile(filePath);
-		return buf.buffer;
+		// 命中时刷新最后使用时间（LRU 依据）
+		entry.lastUsed = Date.now();
+		await saveIndex(index);
+		// 返回精确大小的 ArrayBuffer，避免底层大 Buffer 内存一并传出
+		return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 	} catch {
 		return undefined;
 	}
+});
+
+/** 当前缓存占用统计（大小字节 + 文件数） */
+ipcMain.handle("map-cache:stat", async () => {
+	return getCacheSize();
+});
+
+/** 清空缓存目录并重置索引 */
+ipcMain.handle("map-cache:clear", async () => {
+	await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => {});
+	await fs.mkdir(cacheDir, { recursive: true });
+	await saveIndex({});
+	return getCacheSize();
+});
+
+/** 打开缓存文件夹（资源管理器中显示） */
+ipcMain.handle("map-cache:open-folder", async () => {
+	await fs.mkdir(cacheDir, { recursive: true });
+	await shell.openPath(cacheDir);
+	return cacheDir;
 });
 
 // ============================================================
