@@ -60,22 +60,25 @@ export const getGameMapList = async (
 	size: number,
 	options?: { publishedOnly?: boolean; inuse?: boolean }
 ) => {
-	const where: FindOptionsWhere<GameMap> = {};
-	if (options?.publishedOnly) where.status = "published";
-	if (options?.inuse !== undefined) where.inuse = options.inuse;
-	const gameMapList = await gameMapRepository.find({
-		where,
-		relations: { creator: true },
-		skip: (page - 1) * size,
-		take: size,
-		order: { version: "DESC" },
-	});
-	const total = await gameMapRepository.count({ where });
+	const qb = gameMapRepository
+		.createQueryBuilder("map")
+		.leftJoinAndSelect("map.creator", "creator");
+	if (options?.publishedOnly) qb.andWhere("map.status = :status", { status: "published" });
+	if (options?.inuse !== undefined) qb.andWhere("map.inuse = :inuse", { inuse: options.inuse });
+	qb.addSelect(
+		"CASE WHEN map.creatorId IS NULL OR creator.isAdmin = TRUE THEN 1 ELSE 0 END",
+		"isOfficialOrder"
+	)
+		.orderBy("isOfficialOrder", "DESC")
+		.addOrderBy("map.version", "DESC")
+		.skip((page - 1) * size)
+		.take(size);
+	const [gameMapList, total] = await qb.getManyAndCount();
 	const list = gameMapList.map(withCreatorInfo);
 	return { gameMapList: list, total };
 };
 
-/** 附加创作者展示信息（用户名/账号），剥离 User 实体敏感字段 */
+/** 附加创作者展示信息（用户名/账号/官方标识），剥离 User 实体敏感字段 */
 function withCreatorInfo(gameMap: GameMap) {
 	const creator = gameMap.creator;
 	return {
@@ -98,8 +101,22 @@ function withCreatorInfo(gameMap: GameMap) {
 		pendingVersion: gameMap.pendingVersion,
 		creatorName: creator?.username ?? null,
 		creatorAccount: creator?.useraccount ?? null,
+		// 官方地图：管理员直建（creator 为空）或创作者是管理员
+		isOfficial: !creator || creator.isAdmin === true,
 	};
 }
+
+/** 获取地图详情（附带创作者信息与官方标识） */
+export const getGameMapDetail = async (id: string, options?: { publishedOnly?: boolean }) => {
+	const where: FindOptionsWhere<GameMap> = { id };
+	if (options?.publishedOnly) where.status = "published";
+	const gameMap = await gameMapRepository.findOne({ where, relations: { creator: true } });
+	if (gameMap) {
+		return withCreatorInfo(gameMap);
+	} else {
+		return null;
+	}
+};
 
 export const countGameMapsByCreator = async (creatorId: string) => {
 	return await gameMapRepository.count({ where: { creatorId } });

@@ -10,6 +10,7 @@ import {
 	getAdminGameMapList,
 	getGameMapByCreator,
 	getGameMapById,
+	getGameMapDetail,
 	getGameMapList,
 	reviewGameMap,
 	setGameMapRejectReason,
@@ -465,7 +466,7 @@ gameMapRouter.get("/info", async (req, res) => {
 		return;
 	}
 	try {
-		const gameMap = await getGameMapById(id.toString(), { publishedOnly: true });
+		const gameMap = await getGameMapDetail(id.toString(), { publishedOnly: true });
 		if (!gameMap) {
 			const resMsg: ResInterface = { status: 404, msg: "地图不存在" };
 			res.status(404).json(resMsg);
@@ -492,7 +493,8 @@ gameMapRouter.get("/list", async (req, res) => {
 			data: { total, current: parseInt(page.toString()), gameMapList },
 		};
 		res.status(200).json(resMsg);
-	} catch {
+	} catch (e: any) {
+		serverLog(`获取地图列表失败: ${e?.message || e}`, "error");
 		const resMsg: ResInterface = { status: 500, msg: "获取地图列表失败" };
 		res.status(500).json(resMsg);
 	}

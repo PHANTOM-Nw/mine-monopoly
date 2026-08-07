@@ -52,6 +52,9 @@ const mapAuthor = computed(() => {
 	return displayMapInfo.value?.author || mapData.info?.author || "";
 });
 
+// 是否官方地图（roomInfoStore.mapInfo 来自服务端详情，含 isOfficial）
+const mapIsOfficial = computed(() => roomInfoStore.mapInfo?.isOfficial === true);
+
 // 地图版本
 const mapVersion = computed(() => {
 	return displayMapInfo.value?.version || mapData.info?.version || "";
@@ -97,6 +100,8 @@ const mapDescriptionHtml = computed(() => {
 		<template #title>"{{ mapName }}"地图说明</template>
 		<div class="map-info-container">
 			<div class="map-meta">
+				<span v-if="mapIsOfficial" class="map-official">官方地图</span>
+				<span v-else class="map-workshop">创意工坊</span>
 				<span>作者: {{ mapAuthor }}</span>
 				<span>版本: {{ mapVersion }}</span>
 			</div>
@@ -133,6 +138,16 @@ const mapDescriptionHtml = computed(() => {
 			background-color: rgba(255, 255, 255, 0.6);
 			padding: 0.3rem 0.8rem;
 			border-radius: 0.25rem;
+		}
+
+		.map-official {
+			color: #fff;
+			background-color: #ffb300;
+		}
+
+		.map-workshop {
+			color: #fff;
+			background-color: #4caf50;
 		}
 	}
 

@@ -42,6 +42,9 @@ export interface GameMapInDb {
 	/** 创作者账号（列表查询时附带，未绑定时为 null） */
 	creatorAccount?: string | null;
 
+	/** 是否官方地图（管理员直建或创作者为管理员），列表/详情查询时附带 */
+	isOfficial?: boolean;
+
 	/** 审核状态 */
 	status: GameMapStatus;
 
