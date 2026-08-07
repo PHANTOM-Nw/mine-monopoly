@@ -3,9 +3,13 @@ import FpDialog from "@src/components/utils/fp-dialog/fp-dialog.vue";
 import FpPopover from "@src/components/utils/fp-popover/fp-popover.vue";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { computed, ref } from "vue";
+import { marked } from "marked";
+import changelogContent from "../../../../CHANGELOG.md?raw";
 
 const version = computed(() => __APP_VERSION__);
 const showRewardDialog = ref(false);
+const showChangelogDialog = ref(false);
+const changelogHtml = computed(() => marked.parse(changelogContent) as string);
 const rewardWxUrl = `${import.meta.env.BASE_URL}images/reward-qr-wx.png`;
 const rewardAlipayUrl = `${import.meta.env.BASE_URL}images/reward-qr-alpay.jpg`;
 
@@ -23,12 +27,12 @@ function openRewardDialog() {
 	showRewardDialog.value = true;
 }
 
-function toAFD() {
-	openExternalLink("https://afdian.com/a/fatpaper");
+function openChangelogDialog() {
+	showChangelogDialog.value = true;
 }
 
-function toLog() {
-	openExternalLink("https://fatpaper.site/archives/monopoly-log");
+function toAFD() {
+	openExternalLink("https://afdian.com/a/fatpaper");
 }
 
 function toGithub() {
@@ -55,11 +59,11 @@ function toBilibili() {
 			</template>
 		</fp-popover>
 		<fp-popover placement="right" trigger="hover">
-			<button @click="toLog" class="login-extra-item btn-small about">
-				<FontAwesomeIcon icon="bullhorn" />
+			<button @click="openChangelogDialog" class="login-extra-item btn-small about">
+				<FontAwesomeIcon icon="scroll" />
 			</button>
 			<template #content>
-				<div class="extra-content">查看公告</div>
+				<div class="extra-content">查看更新日志</div>
 			</template>
 		</fp-popover>
 		<fp-popover placement="right" trigger="hover">
@@ -108,6 +112,15 @@ function toBilibili() {
 			</div>
 			<button class="reward-link btn-small" @click="toAFD">前往爱发电</button>
 		</div>
+	</FpDialog>
+
+	<FpDialog
+		v-model:visible="showChangelogDialog"
+		title="更新日志"
+		:hidden-footer="true"
+		:style="{ width: 'min(50rem, 94vw)', height: 'min(70vh, 60rem)' }"
+	>
+		<div class="changelog-container" v-html="changelogHtml"></div>
 	</FpDialog>
 </template>
 
@@ -230,6 +243,57 @@ function toBilibili() {
 .reward-link {
 	--btn-bg: #936ae4;
 	min-width: 9rem;
+}
+
+.changelog-container {
+	padding: 0.2rem 0.4rem;
+
+	:deep(h1) {
+		font-size: 1.1rem;
+		color: var(--fp-color-text-secondary);
+		text-align: center;
+		margin: 0.4rem 0 1rem;
+		opacity: 0.7;
+	}
+
+	:deep(h2) {
+		color: var(--fp-color-primary);
+		margin: 1.4rem 0 0.4rem;
+		font-size: 1.25rem;
+
+		&:first-child {
+			margin-top: 0;
+		}
+	}
+
+	:deep(h3) {
+		color: var(--fp-color-secondary);
+		margin: 0.8rem 0 0.3rem;
+		font-size: 1.05rem;
+	}
+
+	:deep(ul) {
+		list-style: none;
+		padding-left: 0;
+		margin: 0;
+	}
+
+	:deep(li) {
+		color: #3e3e3e;
+		line-height: 1.6;
+		margin-bottom: 0.3rem;
+		padding-left: 0.6rem;
+		text-indent: -0.6rem;
+	}
+
+	:deep(p) {
+		color: #3e3e3e;
+		line-height: 1.6;
+	}
+
+	:deep(strong) {
+		color: var(--fp-color-text-secondary);
+	}
 }
 
 @media (max-width: 768px) {
