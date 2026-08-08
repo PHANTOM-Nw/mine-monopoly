@@ -110,7 +110,8 @@ export type WorkerCommMsg = {
 	};
 }[keyof WorkerCommDataTypeMap];
 
-type EmitOperationResult<T extends OperateType> = { userId: string; operateType: T; data: PlayerOperationResult[T] };
+export type InitOperationMeta = { initSessionId?: string; initStatus?: "ready" | "failed"; reason?: string; messageId?: string };
+type EmitOperationResult<T extends OperateType> = { userId: string; operateType: T; data: PlayerOperationResult[T]; metadata?: InitOperationMeta };
 
 interface WorkerCommDataTypeMap {
 	//Worker Receive
@@ -121,6 +122,7 @@ interface WorkerCommDataTypeMap {
 		roomOwnerId: string;
 		aiConfig: AIDecisionConfig;
 		saveData?: { snapshot: SaveSnapshot; aiPlayerIds: string[] };
+		initSessionId: string;
 	};
 	[WorkerCommType.EmitOperation]: EmitOperationResult<OperateType>;
 	[WorkerCommType.UserOffLine]: { userId: string };

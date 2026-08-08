@@ -5,6 +5,7 @@ message GameMap {
   string jsonData = 2;
   repeated ModelItem modelFiles = 3;
   repeated ImageItem imageFiles = 4;
+  string serverMapId = 5;
 }
 
 message ModelItem {

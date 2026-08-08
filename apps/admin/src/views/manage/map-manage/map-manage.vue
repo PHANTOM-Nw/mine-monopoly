@@ -55,6 +55,7 @@ onMounted(async () => {
 				<map-item
 					@edit="handleGameMapEdit"
 					@deleted="updateList"
+					@changed="updateList"
 					:map-info="mapInfo"
 				/>
 			</a-col>

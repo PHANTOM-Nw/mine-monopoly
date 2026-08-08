@@ -1,5 +1,6 @@
-import { Entity, Column, PrimaryGeneratedColumn, PrimaryColumn, BeforeInsert } from "typeorm";
-import type { GameMapInDb } from "@mine-monopoly/types";
+import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn, Index } from "typeorm";
+import type { GameMapInDb, GameMapStatus } from "@mine-monopoly/types";
+import { User } from "#src/db/entities/User";
 
 @Entity()
 export class GameMap implements GameMapInDb {
@@ -12,8 +13,8 @@ export class GameMap implements GameMapInDb {
 	@Column({ type: "varchar", nullable: false })
 	author: string;
 
-	@Column({ type: "varchar", nullable: false })
-	version: string;
+	@Column({ type: "int", nullable: false, default: 0 })
+	version: number;
 
 	@Column({ type: "text", nullable: true })
 	description: string;
@@ -21,7 +22,7 @@ export class GameMap implements GameMapInDb {
 	@Column({ type: "varchar", nullable: false })
 	coverUrl: string;
 
-	@Column({ type: "varchar", nullable: false })
+	@Column({ type: "varchar", length: 500, nullable: false })
 	mapUrl: string;
 
 	@Column({ type: "varchar", nullable: false })
@@ -29,4 +30,36 @@ export class GameMap implements GameMapInDb {
 
 	@Column({ type: "boolean", nullable: false, default: false })
 	inuse: boolean;
+
+	@Index()
+	@Column({ type: "varchar", length: 36, nullable: true })
+	creatorId: string | null;
+
+	@ManyToOne(() => User, { nullable: true, onDelete: "SET NULL" })
+	@JoinColumn({ name: "creatorId", referencedColumnName: "id" })
+	creator?: User | null;
+
+	@Index()
+	@Column({ type: "varchar", length: 20, nullable: false, default: "reviewing" })
+	status: GameMapStatus;
+
+	@Column({ type: "text", nullable: true })
+	rejectReason: string | null;
+
+	@Column({ type: "varchar", length: 500, nullable: true })
+	pendingUrl: string | null;
+
+	/** 待审核版本的地图源文件（.fpmap）URL，与 pendingUrl 配对 */
+	@Column({ type: "varchar", length: 500, nullable: true })
+	pendingSourceUrl: string | null;
+
+	/** 当前公开版本的地图源文件（.fpmap）URL，与 mapUrl 配对 */
+	@Column({ type: "varchar", length: 500, nullable: true })
+	sourceUrl: string | null;
+
+	@Column({ type: "varchar", length: 64, nullable: true })
+	pendingHash: string | null;
+
+	@Column({ type: "varchar", length: 20, nullable: true })
+	pendingVersion: string | null;
 }

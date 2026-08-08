@@ -1,38 +1,45 @@
-/**
- * MCP Tools for Type Libraries
- *
- * Returns all additional type libraries available to the code editor:
- * - Extra libs (user-defined custom code)
- * - UI template types (generated type declarations from UI templates)
- */
-
 import { invokeTool } from "../bridge.js";
 import { successResult, errorResult } from "../utils.js";
 import { z } from "zod";
 
-export const GetAllTypeLibsSchema = z.object({});
+const TypeLibIdSchema = z.enum([
+	"extra-libs",
+	"ui-template-types",
+	"game-setting-types",
+	"modifier-template-types",
+]);
 
-/**
- * Get all additional type libraries available to the code editor
- */
-export async function getAllTypeLibs(args: unknown) {
+export const ListTypeLibsSchema = z.object({});
+export const GetTypeLibSchema = z.object({ typeLibId: TypeLibIdSchema.describe("类型库ID") });
+
+export async function listTypeLibs(args: unknown) {
 	try {
-		const result = await invokeTool("get_all_type_libs", args);
-		return successResult(result);
+		return successResult(await invokeTool("list_type_libs", args));
 	} catch (error: any) {
-		return errorResult(error.message || "Failed to get type libraries");
+		return errorResult(error.message || "Failed to list type libraries");
 	}
 }
 
-/**
- * Export tool definitions for MCP server
- */
+export async function getTypeLib(args: unknown) {
+	try {
+		return successResult(await invokeTool("get_type_lib", args));
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get type library");
+	}
+}
+
 export const typeLibsTools = [
 	{
-		name: "get_all_type_libs",
-		description:
-			"获取代码编辑器中所有可用的额外类型库。返回 extraLibs（用户自定义的辅助函数、类型和常量）、uiTemplateTypes（UI模板生成的类型声明，如 $ui__template-slug: UISchema）和 gameSettingTypes（游戏设置表单生成的类型声明，如 GameSetting.initMoney）。使用此工具了解编写 effectCode 时可用的额外类型信息。",
-		inputSchema: GetAllTypeLibsSchema,
-		handler: getAllTypeLibs,
+		name: "list_type_libs",
+		description: "列出可用类型库摘要（ID、名称、字符数），不返回源码。使用 get_type_lib 获取指定类型库。",
+		inputSchema: ListTypeLibsSchema,
+		handler: listTypeLibs,
 	},
+	{
+		name: "get_type_lib",
+		description: "按ID获取完整类型库代码。参数：typeLibId（extra-libs、ui-template-types、game-setting-types、modifier-template-types）。",
+		inputSchema: GetTypeLibSchema,
+		handler: getTypeLib,
+	},
+
 ];

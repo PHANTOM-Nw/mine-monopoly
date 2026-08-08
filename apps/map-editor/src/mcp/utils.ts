@@ -27,10 +27,11 @@ export function successResult(data: any) {
 /**
  * Create an error result
  */
-export function errorResult(message: string) {
+export function errorResult(message: string, code = "TOOL_EXECUTION_FAILED", details?: Record<string, unknown>) {
 	return {
 		success: false,
 		error: message,
+		errorInfo: { code, message, ...(details ? { details } : {}) },
 	};
 }
 

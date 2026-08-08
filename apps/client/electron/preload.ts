@@ -48,6 +48,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	openExternal: (url: string) => ipcRenderer.invoke("open-external", url),
 	openLogsFolder: () => ipcRenderer.invoke("open-logs-folder"),
 	openAIConsole: () => ipcRenderer.invoke("open-ai-console"),
+	//地图缓存相关
+	loadMapCache: (mapId: string, hash: string) => ipcRenderer.invoke("map-cache:load", mapId, hash),
+	saveMapCache: (mapId: string, hash: string, buffer: ArrayBuffer, maxSizeBytes?: number) =>
+		ipcRenderer.invoke("map-cache:save", mapId, hash, buffer, maxSizeBytes),
+	getMapCacheStat: () => ipcRenderer.invoke("map-cache:stat"),
+	clearMapCache: () => ipcRenderer.invoke("map-cache:clear"),
+	openMapCacheFolder: () => ipcRenderer.invoke("map-cache:open-folder"),
 	// Inspector (dev only) — only exposed in dev mode
 	...(process.env.VITE_DEV_SERVER_URL ? { openInspector: () => ipcRenderer.invoke("open-inspector") } : {}),
 });

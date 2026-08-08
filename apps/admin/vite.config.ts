@@ -25,7 +25,7 @@ export default defineConfig(({ command }) => {
 			}),
 		],
 		server: {
-			port: 5174,
+			port: 5175,
 		},
 		resolve: {
 			alias: [

@@ -128,11 +128,11 @@ const handleOperation: ClientMessageHandler<SocketMsgType.Operation> = (conn, ms
 			room.abandonGame();
 		} else {
 			// 其他操作转发给 Worker
-			room.emitOperation(clientId, operateType, data);
+			room.emitOperation(clientId, operateType, data, msg.extra);
 		}
 	} else {
 		// 非房主的操作转发给 Worker
-		room.emitOperation(clientId, operateType, data);
+		room.emitOperation(clientId, operateType, data, msg.extra);
 	}
 };
 const handleLeaveRoom: ClientMessageHandler<SocketMsgType.LeaveRoom> = (conn, msg, host, clientId) => {

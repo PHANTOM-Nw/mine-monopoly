@@ -33,6 +33,7 @@ async function readMmmapFile(bytes: Uint8Array) {
 
 	const productMap = decodeProductMap(productData);
 	const mapData = JSON.parse(productMap.payload) as GameMap;
+mapData.serverMapId = productMap.serverMapId || mapData.serverMapId || "";
 
 	const modelFiles = productMap.resources
 		.filter((r) => r.ext === "glb" || r.ext === "gltf")

@@ -17,6 +17,7 @@ export const enum SocketMsgType {
 	GameStart = "GameStart", //游戏开始
 	GameInit = "GameInit", //游戏初始化
 	GameInitFinished = "GameInitFinished", //游戏初始化完成
+	GameInitAborted = "GameInitAborted", //游戏初始化失败并退出游戏页
 	GameData = "GameData", //游戏信息广播
 	GainMoney = "GainMoney", //玩家获得金钱
 	CostMoney = "CostMoney", //玩家花费金钱

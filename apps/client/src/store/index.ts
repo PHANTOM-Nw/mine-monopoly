@@ -291,6 +291,8 @@ export const useSettig = defineStore("setting", {
 			// 阴影开关
 			enableShadow: false,
 			enableModelAnimation: true,
+			// 地图缓存最大容量（MB），默认 500MB
+			mapCacheMaxSizeMB: 500,
 			aiDecisionConfig: normalizeAIDecisionConfig(undefined) as AIDecisionConfig,
 		};
 	},
@@ -329,6 +331,20 @@ export const useSettig = defineStore("setting", {
 		getPixelRatio(): number {
 			const ratioMap = { low: 0.85, medium: 1.0, high: 2.0 };
 			return window.devicePixelRatio * ratioMap[this.graphicQuality];
+		},
+		// 初始化地图缓存上限（从 localStorage 读取，默认 500MB，范围 100MB ~ 10GB）
+		initMapCacheMaxSize() {
+			try {
+				const saved = Number(localStorage.getItem("mapCacheMaxSizeMB"));
+				if (Number.isFinite(saved) && saved > 0) {
+					this.mapCacheMaxSizeMB = Math.min(10240, Math.max(100, Math.round(saved)));
+				} else {
+					this.mapCacheMaxSizeMB = 500;
+				}
+			} catch (e) {
+				console.warn("[设置] localStorage 读取缓存上限失败，使用默认 500MB:", e);
+				this.mapCacheMaxSizeMB = 500;
+			}
 		},
 	},
 });

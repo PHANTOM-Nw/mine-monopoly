@@ -1,5 +1,17 @@
 # @mine-monopoly/map-editor
 
+## 1.2.2
+
+### Patch Changes
+
+- - **地图上传**
+    - 新增地图上传审核发布流：支持地图序列化上传、上传对话框（UploadMapDialog）、API Key 校验与上传限额控制
+  - **MCP 服务**
+    - 重构工具注册机制：新增 registry 统一注册与分类（tools/registry.ts）
+    - 新增批量操作工具 `plan_map_changes` / `apply_map_changes`（map-changes.ts）
+    - 新增地图校验工具 `validate_map`（validate-map.ts）
+    - 新增 properties 工具模块，扩展 map-items、resources、type-libs 等工具能力
+
 ## 1.2.1
 
 ### Patch Changes

@@ -20,7 +20,7 @@ export class CosStorageProvider implements StorageProvider {
 		this.client = new COS({
 			SecretId: env("TC_ID", ""),
 			SecretKey: env("TC_KEY", ""),
-			Timeout: env<number>("COS_TIMEOUT", 60000),
+			Timeout: Number(env("COS_TIMEOUT", "60000")),
 		});
 	}
 

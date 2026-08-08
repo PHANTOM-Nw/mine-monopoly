@@ -37,6 +37,10 @@ const RemoveChanceCardToolSchema = z.object({
 	cardId: z.string().describe("机会卡ID"),
 });
 
+const GetChanceCardByIdToolSchema = z.object({
+	cardId: z.string().describe("机会卡ID"),
+});
+
 const ListChanceCardsToolSchema = z.object({});
 
 /**
@@ -76,6 +80,18 @@ export async function removeChanceCard(args: unknown) {
 }
 
 /**
+ * Get a chance card with full details
+ */
+export async function getChanceCardById(args: unknown) {
+	try {
+		const result = await invokeTool("get_chance_card_by_id", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get chance card");
+	}
+}
+
+/**
  * List all chance cards
  */
 export async function listChanceCards(args: unknown) {
@@ -110,8 +126,14 @@ export const chanceCardTools = [
 		handler: removeChanceCard
 	},
 	{
+		name: "get_chance_card_by_id",
+		description: "根据ID获取单个机会卡的完整信息，包含 effectCode。参数：cardId（机会卡ID）",
+		inputSchema: GetChanceCardByIdToolSchema,
+		handler: getChanceCardById
+	},
+	{
 		name: "list_chance_cards",
-		description: "获取当前地图中所有机会卡的列表。返回所有机会卡的完整信息，包括 ID、名称、类型、描述、颜色、图标ID和效果代码。",
+		description: "获取当前地图中所有机会卡的摘要列表，包含 ID、名称、类型、描述、颜色和图标ID；不包含 effectCode。使用 get_chance_card_by_id 获取完整数据。",
 		inputSchema: ListChanceCardsToolSchema,
 		handler: listChanceCards
 	}

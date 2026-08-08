@@ -39,6 +39,12 @@ const RemovePropertyToolSchema = z.object({
 	mapItemId: z.string().describe("目标地图项ID"),
 });
 
+const GetPropertyByMapItemIdToolSchema = z.object({
+	mapItemId: z.string().describe("目标地图项ID"),
+});
+
+const ListPropertiesToolSchema = z.object({});
+
 /**
  * Wrap flat MCP args into { mapItemId, property: {...} } format expected by service layer
  */
@@ -90,6 +96,24 @@ export async function removeProperty(args: unknown) {
 	}
 }
 
+export async function getPropertyByMapItemId(args: unknown) {
+	try {
+		const result = await invokeTool("get_property_by_map_item_id", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to get property");
+	}
+}
+
+export async function listProperties(args: unknown) {
+	try {
+		const result = await invokeTool("list_properties", args);
+		return successResult(result);
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to list properties");
+	}
+}
+
 /**
  * Export tool definitions for MCP server
  */
@@ -111,5 +135,17 @@ export const propertyTools = [
 		description: "移除地图项的地皮属性。参数：mapItemId（目标地图项ID）",
 		inputSchema: RemovePropertyToolSchema,
 		handler: removeProperty,
+	},
+	{
+		name: "get_property_by_map_item_id",
+		description: "根据地图项ID获取地皮完整信息。参数：mapItemId（目标地图项ID）。",
+		inputSchema: GetPropertyByMapItemIdToolSchema,
+		handler: getPropertyByMapItemId,
+	},
+	{
+		name: "list_properties",
+		description: "列出所有地皮摘要，不返回扩展数据。使用 get_property_by_map_item_id 获取完整信息。",
+		inputSchema: ListPropertiesToolSchema,
+		handler: listProperties,
 	},
 ];

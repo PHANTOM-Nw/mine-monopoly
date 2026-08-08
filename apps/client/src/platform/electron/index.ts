@@ -37,6 +37,13 @@ export function createElectronPlatform(): PlatformAPI {
 		// 历史日志（从主进程文件加载，Electron 专属）
 		getHistoryLogs: api?.getLogs?.bind(api) as any,
 
+		// 地图缓存（Electron 专属，走主进程文件系统）
+		loadMapCache: (mapId, hash) => api?.loadMapCache?.(mapId, hash),
+		saveMapCache: (mapId, hash, buffer, maxSizeBytes) => api?.saveMapCache?.(mapId, hash, buffer, maxSizeBytes),
+		getMapCacheStat: () => api?.getMapCacheStat?.(),
+		clearMapCache: () => api?.clearMapCache?.(),
+		openMapCacheFolder: () => api?.openMapCacheFolder?.(),
+
 		// 开发者
 		openInspector: api?.openInspector?.bind(api),
 		openAIConsole: api?.openAIConsole?.bind(api),

@@ -54,7 +54,7 @@ declare global {
 			startMCPServer: () => Promise<{ success: boolean; message: string }>;
 			stopMCPServer: () => Promise<{ success: boolean; message: string }>;
 			getMCPStatus: () => Promise<{ running: boolean }>;
-			getMCPTools: () => Promise<Array<{ name: string; description: string }>>;
+			getMCPTools: () => Promise<Array<{ name: string; description: string; category: string }>>;
 			onServerStatusChange: (callback: (status: { running: boolean }) => void) => () => void;
 		};
 

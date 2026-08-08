@@ -20,7 +20,7 @@ watch(coverImagePreview, (newUrl, oldUrl) => {
 onMounted(() => {
 	if (!gameMap) return;
 	formValue.name = gameMap.name;
-	formValue.version = gameMap.version;
+	formValue.version = gameMap.pendingVersion || String(gameMap.version);
 	coverImagePreview.value = gameMap.coverUrl;
 });
 

@@ -5,6 +5,7 @@ message ProductMap {
   string mapId = 5;
   string payload = 8;
   repeated ResourceItem resources = 3;
+  string serverMapId = 9;
 }
 
 // Combined resource item (replaces separate ModelItem and ImageItem from source schema).

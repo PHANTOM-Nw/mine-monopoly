@@ -14,6 +14,9 @@ export interface IGameMap {
 
     /** GameMap imageFiles */
     imageFiles?: (IImageItem[]|null);
+
+    /** GameMap serverMapId */
+    serverMapId?: (string|null);
 }
 
 /** Represents a GameMap. */
@@ -36,6 +39,9 @@ export class GameMap implements IGameMap {
 
     /** GameMap imageFiles. */
     public imageFiles: IImageItem[];
+
+    /** GameMap serverMapId. */
+    public serverMapId: string;
 
     /**
      * Creates a new GameMap instance using the specified properties.

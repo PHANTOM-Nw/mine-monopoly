@@ -152,6 +152,7 @@ export async function serializeToDir(mapData: GameMap, dirPath: string): Promise
 		id: mapData.id,
 		inUse: mapData.inUse,
 		info: mapData.info,
+		serverMapId: mapData.serverMapId || "",
 	};
 	await atomicWriteJson(`${dirPath}/map.json`, mapJson);
 
@@ -354,7 +355,7 @@ export async function serializeToDir(mapData: GameMap, dirPath: string): Promise
 
 export async function deserializeFromDir(dirPath: string): Promise<DeserializeResult> {
 	dirPath = normalizePath(dirPath);
-	const mapJson = await readJson<{ id: string; inUse: boolean; info: GameMapInfo }>(`${dirPath}/map.json`);
+	const mapJson = await readJson<{ id: string; inUse: boolean; info: GameMapInfo; serverMapId?: string }>(`${dirPath}/map.json`);
 
 	const mapIndex: string[] =
 		(await API().exists(`${dirPath}/map-index.json`))

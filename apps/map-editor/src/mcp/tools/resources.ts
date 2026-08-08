@@ -23,6 +23,12 @@ export const GetResourceByIdSchema = z.object({
 export const AddTempModelSchema = z.object({});
 
 export const AddTempImageSchema = z.object({});
+export const ListResourcesSchema = z.object({
+	type: z.enum(["model", "image"]).optional(),
+	query: z.string().optional(),
+	offset: z.number().int().min(0).default(0),
+	limit: z.number().int().min(1).max(200).default(50),
+});
 
 /**
  * List all 3D models
@@ -60,6 +66,14 @@ export async function getResourceById(args: unknown) {
 		return successResult(result);
 	} catch (error: any) {
 		return errorResult(error.message || "Failed to get resource");
+	}
+}
+
+export async function listResources(args: unknown) {
+	try {
+		return successResult(await invokeTool("list_resources", ListResourcesSchema.parse(args)));
+	} catch (error: any) {
+		return errorResult(error.message || "Failed to list resources");
 	}
 }
 
@@ -104,6 +118,12 @@ export const resourceTools = [
 		description: "列出地图中所有可用的图片，包括它们的ID、名称和URL",
 		inputSchema: ListImagesSchema,
 		handler: listImages,
+	},
+	{
+		name: "list_resources",
+		description: "按资源类型和名称筛选资源，并分页返回。",
+		inputSchema: ListResourcesSchema,
+		handler: listResources,
 	},
 	{
 		name: "get_resource_by_id",

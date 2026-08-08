@@ -99,8 +99,15 @@ export interface AdminUserListItem {
 	color: string;
 	online: boolean;
 	isAdmin: boolean;
+	isCreator: boolean;
 	createTime: string | null;
 	lastActiveTime: string | null;
+	mapQuota: number | null;
+	mapUploadSizeLimit: number | null;
+	mapDailyUploadLimit: number | null;
+	todayUploaded: number;
+	mapKey: string | null;
+	mapCount: number;
 }
 
 export interface Role {

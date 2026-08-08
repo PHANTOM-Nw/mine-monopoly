@@ -26,111 +26,75 @@ import { customUITools } from "./tools/custom-uis.js";
 import { modifierTemplateTools } from "./tools/modifier-templates.js";
 import { validateEffectCodeTools } from "./tools/validate-effect-code.js";
 import { getCodeTemplateTools } from "./tools/get-code-template.js";
-import { getDefaultCodeTools } from "./tools/get-default-code.js";
+import { allTools } from "./tools/registry.js";
 
 /**
- * Convert Zod schema to JSON Schema format for MCP
+ * Convert Zod v3 schemas to complete JSON Schema objects for MCP clients.
  */
 export function zodToJsonSchema(zodSchema: any): any {
-	// If already a plain JSON Schema object, return as-is
 	if (zodSchema && zodSchema.type === "object" && "properties" in zodSchema && !zodSchema._def) {
 		return zodSchema;
 	}
 
-	// This is a simplified conversion. In production, you might use zod-to-json-schema
-	const shapeDef = zodSchema._def?.shape;
+	const schema = convertZodSchema(zodSchema);
+	return schema.type ? schema : { type: "object", properties: {} };
+}
 
-	if (!shapeDef) {
-		// Handle empty object schemas
-		return { type: "object", properties: {} };
-	}
+function convertZodSchema(zodSchema: any): any {
+	const definition = zodSchema?._def;
+	if (!definition) return {};
 
-	// Check if shape is a function (ZodObject) or a property (other Zod types)
-	const shapeObj = typeof shapeDef === 'function' ? shapeDef() : shapeDef;
-
-	if (!shapeObj) {
-		return { type: "object", properties: {} };
-	}
-
-	const properties: Record<string, any> = {};
-	const required: string[] = [];
-
-	for (const [key, value] of Object.entries(shapeObj)) {
-		const field = value as any;
-		properties[key] = {
-			type: getJsonSchemaType(field),
-			description: field.description || undefined,
-		};
-
-		if (!field.isOptional()) {
-			required.push(key);
-		}
-
-		// Handle enums
-		if (field._def?.values) {
-			properties[key].enum = field._def.values;
-		}
-	}
-
-	const schema: any = {
-		type: "object",
-		properties,
+	const applyDescription = (schema: Record<string, any>) => {
+		if (zodSchema.description) schema.description = zodSchema.description;
+		return schema;
 	};
 
-	if (required.length > 0) {
-		schema.required = required;
-	}
-
-	return schema;
-}
-
-function getJsonSchemaType(zodField: any): string {
-	const typeName = zodField._def?.typeName;
-
-	switch (typeName) {
-		case "ZodString":
-			return "string";
-		case "ZodNumber":
-			return "number";
-		case "ZodBoolean":
-			return "boolean";
-		case "ZodArray":
-			return "array";
-		case "ZodObject":
-		case "ZodRecord":
-			return "object";
-		case "ZodEnum":
-			return "string";
+	switch (definition.typeName) {
 		case "ZodOptional":
-			return getJsonSchemaType(zodField._def?.innerType);
+		case "ZodNullable":
+		case "ZodDefault":
+		case "ZodCatch":
+		case "ZodEffects":
+			return applyDescription(convertZodSchema(definition.innerType ?? definition.schema));
+		case "ZodString":
+			return applyDescription({ type: "string" });
+		case "ZodNumber":
+			return applyDescription({ type: "number" });
+		case "ZodBoolean":
+			return applyDescription({ type: "boolean" });
+		case "ZodLiteral":
+			return applyDescription({ const: definition.value, type: typeof definition.value });
+		case "ZodEnum":
+			return applyDescription({ type: "string", enum: definition.values });
+		case "ZodNativeEnum":
+			return applyDescription({ enum: Object.values(definition.values).filter((value) => typeof value !== "number") });
+		case "ZodArray":
+			return applyDescription({ type: "array", items: convertZodSchema(definition.type) });
+		case "ZodRecord":
+			return applyDescription({ type: "object", additionalProperties: convertZodSchema(definition.valueType) });
+		case "ZodUnion":
+			return applyDescription({ anyOf: definition.options.map((option: any) => convertZodSchema(option)) });
+		case "ZodObject": {
+			const shape = typeof definition.shape === "function" ? definition.shape() : definition.shape;
+			const properties: Record<string, any> = {};
+			const required: string[] = [];
+			for (const [key, field] of Object.entries(shape ?? {})) {
+				properties[key] = convertZodSchema(field);
+				if (!isOptionalSchema(field)) required.push(key);
+			}
+			const schema: Record<string, any> = { type: "object", properties };
+			if (required.length > 0) schema.required = required;
+			return applyDescription(schema);
+		}
 		default:
-			return "string";
+			return applyDescription({});
 	}
 }
 
-/**
- * Collect all tools at module level
- * MCP服务只支持6个核心功能: 机会卡、地块事件、角色、游戏流程、额外库、资源管理
- */
-const allTools = [
-	...chanceCardTools,
-	...mapEventTools,
-	...roleTools,
-	...gamePhaseTools,
-	...extraLibsTools,
-	...typeLibsTools,
-	...resourceTools,
-	...mapItemTools,
-	...propertyTools,
-	...systemTools,
-	...gameSettingTools,
-	...uiTemplateTools,
-	...customUITools,
-	...modifierTemplateTools,
-	...validateEffectCodeTools,
-	...getCodeTemplateTools,
-	...getDefaultCodeTools,
-];
+function isOptionalSchema(zodSchema: any): boolean {
+	const typeName = zodSchema?._def?.typeName;
+	return typeName === "ZodOptional" || typeName === "ZodDefault" || typeName === "ZodCatch";
+}
 
 /**
  * Export all tools for external access
@@ -181,6 +145,7 @@ export function createMCPServer() {
 						text: JSON.stringify({
 							success: false,
 							error: `Unknown tool: ${name}`,
+							errorInfo: { code: "UNKNOWN_TOOL", message: `Unknown tool: ${name}` },
 						}),
 					},
 				],
@@ -208,6 +173,10 @@ export function createMCPServer() {
 							{
 								success: false,
 								error: error.message || `Error executing tool: ${name}`,
+								errorInfo: {
+									code: "TOOL_EXECUTION_FAILED",
+									message: error.message || `Error executing tool: ${name}`,
+								},
 							},
 							null,
 							2

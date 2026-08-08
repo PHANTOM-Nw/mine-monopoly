@@ -5,7 +5,7 @@ import { GameMapInDb } from "@mine-monopoly/types";
 export async function getGameMapList(page: number, size: number) {
 	const response = await apiClient.get<
 		ApiResponse<{ total: number; gameMapList: GameMapInDb[]; current: number }>
-	>("/game-map/list", { params: { page, size } });
+	>("/game-map/list", { params: { page, size, inuse: true } });
 
 	const { total, gameMapList, current } = (response as any).data;
 	return { total, gameMapList, current };

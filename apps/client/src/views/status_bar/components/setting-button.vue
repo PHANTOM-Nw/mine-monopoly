@@ -13,11 +13,13 @@ import { useRoomInfo, useChat, useGameLog } from "@src/store";
 import { useGameData } from "@src/store/game";
 import router from "@src/router";
 import LogPanel from "@src/components/log-panel";
+import CachePanel from "@src/components/cache-panel";
 import AiSettingPanel from "./ai-setting-panel.vue";
 
 const settingVisible = ref(false);
 const logPanelVisible = ref(false);
 const aiSettingVisible = ref(false);
+const cachePanelVisible = ref(false);
 
 // 暴露 window 对象给模板使用
 const win = window as any;
@@ -103,7 +105,6 @@ const tempMusicVolume = ref(settingStore.musicVolume);
 const tempMasterMuted = ref(settingStore.masterMuted);
 const tempSFXMuted = ref(settingStore.sfxMuted);
 const tempMusicMuted = ref(settingStore.musicMuted);
-
 // 监听设置面板打开，重置临时状态
 watch(settingVisible, (isOpen) => {
 	if (isOpen) {
@@ -564,6 +565,14 @@ const applySettings = () => {
 					</div>
 				</div>
 
+				<!-- 缓存管理（仅 Electron 平台，独立面板） -->
+				<div v-if="win.platformAPI?.getMapCacheStat" class="setting-item">
+					<div class="label">缓存</div>
+					<div class="content log-actions">
+						<button @click="cachePanelVisible = true" class="btn-small log-button">缓存管理</button>
+					</div>
+				</div>
+
 				<div class="setting-item">
 					<div class="label">AI</div>
 					<div class="content setting-link-content">
@@ -600,6 +609,7 @@ const applySettings = () => {
 
 	<!-- 日志面板 -->
 	<LogPanel v-model:visible="logPanelVisible" />
+	<CachePanel v-model:visible="cachePanelVisible" />
 	<AiSettingPanel v-if="!hasStandaloneAIConsole" v-model:visible="aiSettingVisible" />
 </template>
 
@@ -674,6 +684,8 @@ const applySettings = () => {
 					.log-button {
 						flex: 0 0 auto;
 					}
+
+
 				}
 
 				// 音量控制样式

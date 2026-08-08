@@ -9,6 +9,7 @@ export const getUserList = async (
 		search?: string;
 		online?: boolean;
 		isAdmin?: boolean;
+		isCreator?: boolean;
 		sortBy?: "createTime" | "lastActiveTime" | "username" | "useraccount";
 		sortOrder?: "ASC" | "DESC";
 	}
@@ -22,6 +23,7 @@ export const getUserList = async (
 				search: options?.search,
 				online: options?.online,
 				isAdmin: options?.isAdmin,
+				isCreator: options?.isCreator,
 				sortBy: options?.sortBy,
 				sortOrder: options?.sortOrder,
 			},
@@ -36,6 +38,7 @@ export const createUser = async (params: {
 	password: string;
 	color: string;
 	isAdmin: boolean;
+	isCreator?: boolean;
 }) => {
 	const res = await _axios.post<ApiResponse<string>>("/user/create", params);
 	return res.data.data;
@@ -43,10 +46,14 @@ export const createUser = async (params: {
 
 export const updateUser = async (params: {
 	id: string;
-	username: string;
-	password: string;
-	color: string;
-	isAdmin: boolean;
+	username?: string;
+	password?: string;
+	color?: string;
+	isAdmin?: boolean;
+	isCreator?: boolean;
+	mapQuota?: number | null;
+	mapUploadSizeLimit?: number | null;
+	mapDailyUploadLimit?: number | null;
 }) => {
 	const res = await _axios.post<ApiResponse<string>>("/user/update", params);
 	return res.data.data;
@@ -54,6 +61,26 @@ export const updateUser = async (params: {
 
 export const deleteUser = async (id: string) => {
 	const res = await _axios.delete<ApiResponse<string>>("/user/delete", { params: { id } });
+	return res.data.data;
+};
+
+export const generateMapKey = async (userId: string) => {
+	const res = await _axios.post<ApiResponse<{ key: string }>>("/user/key", { userId });
+	return res.data.data;
+};
+
+export const resetMapKey = async (userId: string) => {
+	const res = await _axios.post<ApiResponse<{ key: string }>>("/user/key/reset", { userId });
+	return res.data.data;
+};
+
+export const revokeMapKey = async (userId: string) => {
+	const res = await _axios.post<ApiResponse<{ key: string } | null>>("/user/key/revoke", { userId });
+	return res.data.data;
+};
+
+export const resetMapKeyUploadCount = async (userId: string) => {
+	const res = await _axios.post<ApiResponse<{ todayUploaded: number }>>("/user/key/reset-upload-count", { userId });
 	return res.data.data;
 };
 

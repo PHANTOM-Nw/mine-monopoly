@@ -99,13 +99,13 @@
 |------|--------|------|
 | System | check_mcp_connection | 检查连接状态 |
 | Map Items | list_map_items / get_map_item | 查询地图元素 |
-| Map Events | list_map_events / get_map_event / create_map_event / update_map_event / delete_map_event | 地图事件 CRUD |
-| Chance Cards | list_chance_cards / get_chance_card / create_chance_card / update_chance_card / delete_chance_card | 机会卡 CRUD |
-| Roles | list_roles / get_role / create_role / update_role / delete_role | 角色 CRUD |
+| Map Events | list_map_events / get_map_event_by_id / add_map_event / update_map_event / remove_map_event | 地图事件 CRUD；列表不返回 effectCode |
+| Chance Cards | list_chance_cards / get_chance_card_by_id / add_chance_card / update_chance_card / remove_chance_card | 机会卡 CRUD；列表不返回 effectCode |
+| Roles | list_roles / get_role_by_id / add_role / update_role / remove_role | 角色 CRUD；列表不返回 initCode |
 | Properties | list_properties / get_property / create_property / update_property / delete_property | 地产 CRUD |
-| Game Phases | list_game_phases / create_game_phase / update_game_phase / delete_game_phase | 游戏阶段 CRUD |
+| Game Phases | get_phases / get_phase_by_id / add_phase / update_phase / remove_phase | 游戏阶段 CRUD；阶段列表不返回 initEventCode |
 | Game Settings | get_game_settings / update_game_settings | 游戏设置读写 |
-| Modifier Templates | list_modifier_templates / create_modifier_template / update_modifier_template / delete_modifier_template | 修饰器模板 CRUD |
+| Modifier Templates | list_modifier_templates / get_modifier_template / create_modifier_template / update_modifier_template / remove_modifier_template | 修饰器模板 CRUD；列表不返回 effectCode |
 | UI Templates | list_ui_templates / create_ui_template / update_ui_template / delete_ui_template | UI 模板 CRUD |
 | Custom UIs | list_custom_uis / create_custom_ui / update_custom_ui / delete_custom_ui | 自定义 UI CRUD |
 | Extra Libs | list_extra_libs / create_extra_lib / update_extra_lib / delete_extra_lib | 额外库 CRUD |
