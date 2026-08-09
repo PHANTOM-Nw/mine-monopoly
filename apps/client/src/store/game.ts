@@ -1,5 +1,6 @@
 import { ResourcesType, GameMap, PlayerInfo, PropertyInfo, GameData, IGameProcessExportData } from "@mine-monopoly/types";
 import { defineStore } from "pinia";
+import { randomUUID } from "@mine-monopoly/utils/crypto";
 import { useUserInfo } from ".";
 import useEventBus from "@src/utils/event-bus";
 import { compareObjectArrays } from "@src/utils";
@@ -35,7 +36,7 @@ export const useResourceStore = defineStore("temp-resource", {
 
 export const useMapData = defineStore("map-data", {
 	state: (): Omit<GameMap, "phases"> => ({
-		id: crypto.randomUUID(),
+		id: randomUUID(),
 		info: {
 			name: "",
 			author: "",

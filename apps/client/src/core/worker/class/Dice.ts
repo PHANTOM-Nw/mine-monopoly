@@ -1,5 +1,6 @@
 import { DiceInfo, IDice } from "@mine-monopoly/types";
 import { clone, result } from "lodash";
+import { randomUUID } from "@mine-monopoly/utils/crypto";
 
 class Dice implements IDice {
 	public id: string;
@@ -7,7 +8,7 @@ class Dice implements IDice {
 	public prophecy: number | undefined = undefined;
 
 	constructor(diceValues?: number[]) {
-		this.id = crypto.randomUUID();
+		this.id = randomUUID();
 		diceValues && this.setValues(diceValues);
 	}
 
