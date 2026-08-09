@@ -32,6 +32,13 @@ export const __ICE_USE_PREFIX__ = !!icePrefix;
 // prefix 模式下 peerjs 的 secure 必须跟随部署协议：写死 true 会让 http 部署
 // 去连 wss://host:443，信令直接连不上。
 export const __ICE_SECURE__ = protocol === "https";
+// prefix 模式走 nginx 路径反代，信令端口就是站点自身的端口。
+// ⚠ 这个必须显式传给 peerjs：它的默认 port 是云服务的 443（util.CLOUD_PORT），
+// 不传的话 http 部署会去连 http://host:443，而 nginx 只在 80 上监听。
+export const __ICE_SIGNAL_PORT__ = env<number>(
+	"ICE_SIGNAL_PORT",
+	protocol === "https" ? 443 : 80,
+);
 
 // Admin 服务地址
 export const __MONOPOLY_ADMIN__ = adminPrefix
