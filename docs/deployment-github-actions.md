@@ -12,7 +12,9 @@ GitHub Actions
 ├── build-web    客户端 web 产物（域名/前缀是编译期注入的，必须在 CI 构建）
 └── deploy       SSH 到目标机
                  ├── rsync docker/deploy/ → ${DEPLOY_PATH}
-                 ├── docker compose pull && up -d   (mysql + server)
+                 ├── docker save | gzip | ssh docker load  (mysql + server)
+                 │   ← IMAGE_TRANSPORT=registry 时改成目标机自己 compose pull
+                 ├── docker compose up -d
                  ├── 静态产物原子切换到 ${WEB_ROOT}
                  ├── 装 nginx location 片段并 reload
                  └── 本机自检 + 公网自检
@@ -34,16 +36,36 @@ MONOPOLY_ADMIN_PORT 都在云安全组里放行。路径模式全部走已经开
 **为什么镜像在 CI 构建**：小规格云主机（1～2G 内存）跑不动这个 monorepo 的构建，
 而且 admin 前端的编译期变量本来就该由 CI 注入。
 
-**为什么 MySQL 镜像也要经过 GHCR**：很多云主机（尤其国内）连不上
-`registry-1.docker.io`，直接用 `mysql:8.0` 会在服务器上 pull 超时导致部署失败。
-CI 那边能连 Docker Hub，所以 `build-image` 里用
-`docker buildx imagetools create` 把它**原样拷一份到 GHCR**（registry 到 registry
-的 manifest 拷贝，不落地到 runner 磁盘，保留多架构 manifest），服务器只从 GHCR 拉，
-全程不碰 Docker Hub。目标机因此只需要能访问 `ghcr.io` 一个域名。
+### 镜像投递方式（`IMAGE_TRANSPORT`）
 
-要关掉这个行为（比如你的机器本来就能连 Docker Hub，或想用云厂商的镜像源），
-把 variable `MYSQL_MIRROR_TO_GHCR` 设成 `false`；`MYSQL_IMAGE` 本身填 `ghcr.io/...`
-开头的值时也会自动跳过转存。
+很多云主机（尤其国内）拉镜像很痛苦：Docker Hub 的 `registry-1.docker.io` 常年连不上，
+GHCR 的 manifest 走 `ghcr.io` 但 blob 走 `pkg-containers.githubusercontent.com`，
+后者经常传到一半断流。所以镜像怎么落到目标机上是可选的：
+
+| 值 | 做法 | 目标机需要能访问 |
+| --- | --- | --- |
+| `ssh`（默认） | CI 拉好镜像，`docker save \| gzip \| ssh docker load` 推过去 | **什么 registry 都不需要** |
+| `registry` | 目标机自己 `docker compose pull` | `ghcr.io` + `pkg-containers.githubusercontent.com` |
+
+`ssh` 模式的取舍：
+
+- 目标机零 registry 依赖，**也不需要 GHCR 凭据**——`.ghcr-token` 根本不会下发到那台机器
+- 服务端、MySQL、以及勾了 `deploy_coturn` 时的 coturn，三个镜像全走这条路
+- 代价是每次新 commit 要经 SSH 传一次完整镜像（约 500MB 未压缩，gzip 后小得多）。
+  tag 是不可变的 `sha-xxx`，目标机已有的镜像会跳过，重跑同一 commit 不会重传
+- 镜像照旧会推到 GHCR，回滚仍然可用
+
+`registry` 模式适合带宽好、且目标机能顺畅访问 GHCR 的情况，能省下 CI 的传输时间。
+这时 `remote-apply.sh` 会带退避重试地 pull（轮数看 `PULL_RETRIES`），
+并且 `MYSQL_MIRROR_TO_GHCR` 才有意义：`build-image` 会用
+`docker buildx imagetools create` 把 MySQL 镜像**原样拷一份到 GHCR**（registry 到
+registry 的 manifest 拷贝，不落地到 runner 磁盘，保留多架构 manifest），
+这样目标机只需要能访问 `ghcr.io` 一个域名，不必碰 Docker Hub。
+把它设成 `false` 可关掉；`MYSQL_IMAGE` 填 `ghcr.io/...` 开头的值时也会自动跳过转存。
+
+> 从 `registry` 切到 `ssh` 后，目标机上原先转存的 `*-mysql:8.0` 镜像会变成无人引用的
+> 残留（`prune_old_images` 只清服务端镜像）。想回收磁盘就手动
+> `docker rmi ghcr.io/<owner>/mine-monopoly-mysql:8.0`。
 
 ## 一、准备目标服务器
 
@@ -132,8 +154,9 @@ nginx -T | grep -n "include\|server_name"
 | `MYSQL_PORT` | `3306` | |
 | `MYSQL_DATABASE` | `monopoly` | ⚠ `dbConnecter.ts` 把库名硬编码成 `monopoly`，改这个不生效 |
 | `MYSQL_USERNAME` | `root` | 非 root 时首次初始化会自动建号授权 |
-| `MYSQL_IMAGE` | `mysql:8.0` | 别升到 8.4，`my.cnf` 里的老参数在 8.4 会启动失败。CI 会把它转存到 GHCR，见下 |
-| `MYSQL_MIRROR_TO_GHCR` | `true` | 是否把 MySQL 镜像转存到 GHCR。目标机连不上 Docker Hub 时必须开着（默认） |
+| `MYSQL_IMAGE` | `mysql:8.0` | 别升到 8.4，`my.cnf` 里的老参数在 8.4 会启动失败 |
+| `IMAGE_TRANSPORT` | `ssh` | 镜像怎么到目标机，见「镜像投递方式」 |
+| `MYSQL_MIRROR_TO_GHCR` | `true` | 是否把 MySQL 镜像转存到 GHCR。**只在 `IMAGE_TRANSPORT=registry` 下有意义**，ssh 模式会强制关掉 |
 | `MYSQL_INNODB_BUFFER_POOL_SIZE` | `96M` | 小内存机器的关键参数 |
 | `MYSQL_MAX_CONNECTIONS` | `60` | |
 | `MYSQL_MEMORY_LIMIT` | `512m` | 容器内存上限 |
@@ -154,6 +177,7 @@ nginx -T | grep -n "include\|server_name"
 | `GHCR_USERNAME` | `github.actor` | 只有用 `GHCR_PAT` 且账号不同时才需要 |
 | `IMAGE_KEEP` | `3` | 目标机保留几个历史镜像 |
 | `HEALTH_TIMEOUT` | `300` | 等容器健康的秒数 |
+| `PULL_RETRIES` | `4` | 目标机拉镜像整体重试轮数，见「镜像拉不动」 |
 | `TZ` | `Asia/Shanghai` | |
 
 ## 三、Repository Secrets
@@ -180,7 +204,11 @@ nginx -T | grep -n "include\|server_name"
 
 ### 关于 GHCR 凭据
 
-镜像包默认是私有的，目标机 pull 需要凭据：
+**`IMAGE_TRANSPORT=ssh`（默认）下这一节可以整段跳过** —— 镜像是 CI 推过去的，
+目标机不连 registry，`.ghcr-token` 也不会下发到那台机器上，`GHCR_PAT` / `GHCR_USERNAME`
+都不用配。
+
+`IMAGE_TRANSPORT=registry` 时镜像包默认是私有的，目标机 pull 需要凭据：
 
 - **不配 `GHCR_PAT`**：用本次 run 的 `GITHUB_TOKEN` 登录，拉完镜像后脚本会 `docker logout`。
   能正常部署，但之后你在服务器上手动 `docker compose pull` 会 401（镜像已缓存在本地，
@@ -336,6 +364,49 @@ curl -i -H "Host: $MONOPOLY_DOMAIN" http://127.0.0.1/monopoly-server/health
 # 看生效的 nginx 配置
 nginx -T | grep -A5 monopoly
 ```
+
+### 镜像拉不动（`Apply on Remote` 刷屏 `Retrying in N seconds`）
+
+日志长这样，而且是在 `Apply on Remote` 步骤里：
+
+```
+ 4feea04c1543 Retrying in 15 seconds
+ 4feea04c1543 Retrying in 14 seconds
+ ...
+ 4feea04c1543 Downloading [>       ]  131.1kB/11.77MB
+```
+
+这是**目标机**在 `docker compose pull`，不是 CI 在拉 —— 也就是说你跑在
+`IMAGE_TRANSPORT=registry` 下。GHCR 的 manifest 走 `ghcr.io`，但 blob 走
+`pkg-containers.githubusercontent.com`，后者从国内机器经常传到一半断流。
+
+> 顺带：重试后进度条上的"总量"是**剩余量**，所以一个 43MB 的层会显示成
+> `11.77MB`，别把它当成另一个层去查。
+
+**直接的解法是把 variable `IMAGE_TRANSPORT` 设成 `ssh`（现在的默认值）** ——
+改由 CI 把镜像推过去，目标机彻底不连 registry。
+
+一定要留在 `registry` 模式的话，`remote-apply.sh` 已经做了整体重试（已下完的层留在
+本地，每轮都是净进展）和串行拉取；还不够就：
+
+```bash
+# 1. 降低单次 pull 的并发（默认 3 条并发抢窄带宽，反而更容易断）
+#    在目标机上：
+cat /etc/docker/daemon.json                     # 先看有没有，别覆盖已有配置
+# 加入 "max-concurrent-downloads": 1 后
+systemctl restart docker
+
+# 2. 调大重试轮数：repo variable PULL_RETRIES=8
+
+# 3. 先手动把镜像拉下来，再跑 workflow（sha-xxx tag 不可变，本地有就直接复用）
+docker login ghcr.io -u <你的GitHub用户名>       # 私有包才需要
+docker pull ghcr.io/<owner>/mine-monopoly-server:sha-<12位commit>
+```
+
+### `ssh` 模式下报「目标机上缺少这些镜像」
+
+`Ship Images to Remote` 步骤没跑成功（或因为 `IMAGE_TRANSPORT` 中途改过而被跳过）。
+先看那一步的日志；`docker load` 失败最常见的原因是目标机 `/var/lib/docker` 磁盘满了。
 
 ## 七、回滚
 

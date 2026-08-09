@@ -39,6 +39,10 @@ source ./deploy.conf
 : "${GHCR_PERSIST_LOGIN:=false}"
 : "${IMAGE_KEEP:=3}"
 : "${HEALTH_TIMEOUT:=300}"
+: "${PULL_RETRIES:=4}"
+# ssh：镜像由 workflow 的 Ship Images to Remote 步骤 docker load 到本机，
+#      这台机器全程不连任何 registry。registry：本机自己 pull。
+: "${IMAGE_TRANSPORT:=registry}"
 # docker compose 是从环境变量读 COMPOSE_PROFILES 的，source 进来的还得导出
 export COMPOSE_PROFILES="${COMPOSE_PROFILES:-}"
 
@@ -46,6 +50,10 @@ STAMP="$(date +%Y%m%d%H%M%S)"
 
 # ---------------------------------------------------------------- GHCR 登录
 ghcr_login() {
+  if [ "$IMAGE_TRANSPORT" = "ssh" ]; then
+    log "镜像由 CI 经 SSH 送达，跳过 registry 登录"
+    return 0
+  fi
   if [ ! -s ./.ghcr-token ]; then
     warn "没有收到 GHCR 凭据，假定镜像是公开的或本机已登录"
     return 0
@@ -65,9 +73,75 @@ ghcr_logout() {
 trap ghcr_logout EXIT
 
 # ---------------------------------------------------------------- 容器
+# IMAGE_TRANSPORT=ssh：镜像已经由 CI docker load 进来了，这里只确认一遍。
+# 缺镜像时不去 pull —— 这台机器可能压根连不上 registry，与其卡在超时上，
+# 不如立刻报错指向真正出问题的那一步。compose config --images 会按当前
+# COMPOSE_PROFILES 列出实际要用的镜像，coturn 开没开都能覆盖到。
+verify_images() {
+  log "校验 CI 送过来的镜像"
+  local img images missing=""
+  # 分两步写：local 和赋值合在一行的话，退出码会变成 local 的，命令失败就吞了
+  images="$(docker compose config --images)" \
+    || die "docker compose config --images 执行失败，检查 .env 与 docker-compose.yml"
+  [ -n "$images" ] || die "compose 没解析出任何镜像，bundle 可能不完整"
+
+  while read -r img; do
+    [ -n "$img" ] || continue
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      printf '  \033[32mok\033[0m   %s\n' "$img"
+    else
+      printf '  \033[31mMISS\033[0m %s\n' "$img"
+      missing="${missing} ${img}"
+    fi
+  done <<< "$images"
+
+  [ -z "$missing" ] || die "目标机上缺少这些镜像：${missing}
+     IMAGE_TRANSPORT=ssh 时镜像由 workflow 的 Ship Images to Remote 步骤送达，
+     该步骤失败或被跳过时会出现这种情况。也可以把 variable IMAGE_TRANSPORT
+     改成 registry，让目标机自己去 pull。"
+}
+
+# 目标机到 ghcr.io 的链路不稳：manifest 走 ghcr.io，blob 走
+# pkg-containers.githubusercontent.com，后者经常传到一半断流，日志里表现为
+# 一屏 "<layer> Retrying in N seconds"。compose 自己只在层级别重试有限次，
+# 用尽就整体失败 —— 在 set -e 下会把整次部署带崩。
+#
+# 对策两条：
+#   1. 已经拉完的层是留在本地的，所以每一轮重试都是净进展，整体重试有意义
+#   2. 串行拉（COMPOSE_PARALLEL_LIMIT=1）：窄带宽下并发只会互相抢，反而更难拉完
+pull_images() {
+  if [ "$IMAGE_TRANSPORT" = "ssh" ]; then
+    verify_images
+    return 0
+  fi
+
+  if docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1; then
+    # sha-xxx tag 不可变，层齐了 pull 只是校验一下 manifest，几乎不耗时
+    log "本地已有 ${SERVER_IMAGE}，pull 只做校验"
+  else
+    log "拉取镜像 ${SERVER_IMAGE}"
+  fi
+
+  local attempt=1 delay
+  export COMPOSE_PARALLEL_LIMIT=1
+  while :; do
+    if docker compose pull; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$PULL_RETRIES" ]; then
+      die "拉取镜像失败（已尝试 ${PULL_RETRIES} 次）。目标机到 ghcr.io 的连通性有问题，
+     先在机器上试 curl -sSI https://pkg-containers.githubusercontent.com/ ；
+     长期方案见 docs/deployment-github-actions.md 的「镜像拉不动」一节。"
+    fi
+    delay=$((attempt * 15))
+    warn "拉取失败（第 ${attempt}/${PULL_RETRIES} 次），${delay}s 后重试（已完成的层会复用）"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+}
+
 start_stack() {
-  log "拉取镜像 ${SERVER_IMAGE}"
-  docker compose pull
+  pull_images
 
   log "启动 compose project 'monopoly'（profiles=${COMPOSE_PROFILES:-<none>}）"
   # 不用 --remove-orphans：coturn 是 profile 服务，profile 关闭时可能被误判为孤儿
@@ -238,6 +312,7 @@ prune_old_images() {
 # ---------------------------------------------------------------- main
 echo "MineMonopoly deploy @ $(hostname) $(date -Is)"
 echo "  image        : ${SERVER_IMAGE}"
+echo "  transport    : ${IMAGE_TRANSPORT}"
 echo "  deploy path  : ${SCRIPT_DIR}"
 echo "  web          : ${DEPLOY_WEB} -> ${WEB_ROOT:-<n/a>}"
 echo "  nginx        : ${UPDATE_NGINX} -> ${NGINX_SNIPPET_PATH:-<n/a>}"
