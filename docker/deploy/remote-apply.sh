@@ -71,6 +71,15 @@ start_stack() {
 
   log "启动 compose project 'monopoly'（profiles=${COMPOSE_PROFILES:-<none>}）"
   # 不用 --remove-orphans：coturn 是 profile 服务，profile 关闭时可能被误判为孤儿
+  if docker compose up -d; then
+    return 0
+  fi
+
+  # MySQL 首次初始化期间若抖动一下（被 restart 策略重启），compose 的
+  # depends_on: service_healthy 会当场放弃，把 server 容器留在 Created 状态。
+  # 这时 MySQL 自己往往几秒后就好了，等它 healthy 再补一次 up 即可。
+  warn "首次 up 失败，等 MySQL 稳定后重试一次"
+  wait_healthy monopoly-mysql "$HEALTH_TIMEOUT"
   docker compose up -d
 }
 
