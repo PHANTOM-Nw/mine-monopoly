@@ -60,6 +60,9 @@ jobs:
           V_ICE_SERVER_PORT: ${{ vars.ICE_SERVER_PORT }}
           V_MONOPOLY_ADMIN_PORT: ${{ vars.MONOPOLY_ADMIN_PORT }}
           V_DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          # 这个没有通用默认值：它必须是目标机上已经被某个 server{} include 的文件，
+          # 每台机器的 nginx 布局都不一样，只能由使用者提供。
+          V_NGINX_INCLUDE_FILE: ${{ vars.NGINX_INCLUDE_FILE }}
           # 主机信息允许放 Variables 或 Secrets
           V_DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
           V_DEPLOY_USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER }}
@@ -70,7 +73,7 @@ jobs:
           S_MAP_ENCRYPT_KEY: ${{ secrets.MAP_ENCRYPT_KEY }}
         run: |
           missing=()
-          for name in V_MONOPOLY_DOMAIN V_PROTOCOL V_SERVER_PORT V_ICE_SERVER_PORT \
+          for name in V_MONOPOLY_DOMAIN V_PROTOCOL V_SERVER_PORT V_ICE_SERVER_PORT V_NGINX_INCLUDE_FILE \
                       V_MONOPOLY_ADMIN_PORT V_DEPLOY_PATH V_DEPLOY_HOST V_DEPLOY_USER; do
             [ -n "${!name}" ] || missing+=("variable ${name#V_}")
           done
@@ -400,7 +403,7 @@ jobs:
           WEB_BASE_PATH='${WEB_BASE}'
 
           NGINX_SNIPPET_PATH='${{ vars.NGINX_SNIPPET_PATH || '/etc/nginx/inc/monopoly.conf' }}'
-          NGINX_INCLUDE_FILE='${{ vars.NGINX_INCLUDE_FILE || '/etc/nginx/inc/site-common.conf' }}'
+          NGINX_INCLUDE_FILE='${{ vars.NGINX_INCLUDE_FILE }}'
 
           MONOPOLY_DOMAIN='${{ vars.MONOPOLY_DOMAIN }}'
           BIND_ADDRESS='${{ vars.BIND_ADDRESS || '127.0.0.1' }}'
