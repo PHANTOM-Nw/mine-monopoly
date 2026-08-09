@@ -83,10 +83,10 @@ ssh -i ~/.ssh/<已有可用密钥> root@<IP> \
 
 | Variable | 说明 | 示例 |
 | --- | --- | --- |
-| `DEPLOY_HOST` | 服务器地址（也可放 Secrets） | `116.62.47.225` |
+| `DEPLOY_HOST` | 服务器地址（也可放 Secrets） | `203.0.113.10` |
 | `DEPLOY_USER` | SSH 用户（也可放 Secrets） | `root` |
 | `DEPLOY_PATH` | 部署目录，workflow 独占管理 | `/opt/monopoly` |
-| `MONOPOLY_DOMAIN` | 对外访问的域名或 IP | `116.62.47.225` |
+| `MONOPOLY_DOMAIN` | 对外访问的域名或 IP | `game.example.com` |
 | `PROTOCOL` | `http` 或 `https` | `http` |
 | `SERVER_PORT` | API 端口（容器内 + 宿主机 loopback） | `8181` |
 | `ICE_SERVER_PORT` | PeerJS 信令端口 | `8182` |
@@ -94,9 +94,18 @@ ssh -i ~/.ssh/<已有可用密钥> root@<IP> \
 | `API_BASE_PREFIX` | API 反代前缀，形如 `/xxx` | `/monopoly-server` |
 | `ICE_BASE_PREFIX` | 信令反代前缀 | `/monopoly-ice` |
 | `ADMIN_BASE_PREFIX` | 后台反代前缀 | `/monopoly-admin` |
+| `NGINX_INCLUDE_FILE` | 目标机上**已被某个 `server{}` include** 的文件，workflow 往里追加一行 include | 见下 |
 
 > 三个端口只要在目标机上没被占用就行（它们只绑 127.0.0.1，不对公网开放）。
 > 用 `ss -lntp` 先确认。
+
+`NGINX_INCLUDE_FILE` 没有通用默认值 —— 每台机器 nginx 布局不同，只能你自己给。
+用 `nginx -T` 找到你的 `server{}` 块里已有的 include，或者自己建一个再在 server 块里
+include 一次。确认方法：
+
+```bash
+nginx -T | grep -n "include\|server_name"
+```
 
 ### 可选（有默认值）
 
@@ -105,8 +114,7 @@ ssh -i ~/.ssh/<已有可用密钥> root@<IP> \
 | `DEPLOY_PORT` | `22` | SSH 端口 |
 | `VITE_WEB_BASE_PATH` | `/monopoly/` | 客户端 web 的访问路径 |
 | `WEB_ROOT` | `/var/www/monopoly` | 静态产物落盘目录 |
-| `NGINX_INCLUDE_FILE` | `/etc/nginx/inc/site-common.conf` | 被 `server{}` include 的文件，workflow 往里追加一行 include |
-| `NGINX_SNIPPET_PATH` | `/etc/nginx/inc/monopoly.conf` | 生成的 location 片段落盘位置 |
+| `NGINX_SNIPPET_PATH` | `/etc/nginx/inc/monopoly.conf` | 生成的片段落盘位置。⚠ **不要放进 `conf.d/` 之类被 `http{}` 自动 glob 的目录** —— 片段里是 `location`，在 `http` 层是非法指令，会让整个 nginx 起不来 |
 | `NGINX_MAX_BODY_SIZE` | `50M` | 地图/头像上传体积上限 |
 | `BIND_ADDRESS` | `127.0.0.1` | 容器端口绑定地址。改成 `0.0.0.0` 才是端口直连模式（需开安全组） |
 | `MYSQL_HOST` | `mysql` | 用自带 MySQL 时必须是 compose 服务名 `mysql` |
@@ -192,27 +200,23 @@ ssh -i ~/.ssh/<已有可用密钥> root@<IP> \
 
 跑完在 Summary 里能看到镜像 tag、访问地址和回滚命令。
 
-## 五、部署到 116.62.47.225 的具体填法
+## 五、填写范例
 
-这台机器的现状（已实地确认）：
-
-- Alibaba Cloud Linux 3，2 vCPU / 1.8G 内存、**无 swap**、27G 可用磁盘
-- Docker 26.1.3 + compose v2.27.0，当前没有任何容器
-- nginx 1.24 在 80 端口，已有站点：`/chatjudge`、`/GameSimulator`、`/amongai/`、`/interleaf/`；
-  共用的 location 文件是 `/etc/nginx/inc/site-common.conf`
-- 没有 MySQL（3306 空闲）→ 用自带的 MySQL 容器
-- **已有一个宿主机 coturn 占用 3478**，用的是 `lt-cred-mech` 静态账号模式
-- 8080 / 8081 被 PM2 占用；81 / 82 / 83 / 8181 / 8182 / 8183 都空闲
+> ⚠ **不要把你自己机器的 IP、主机名、同机其他服务、目录布局写进这个文件。**
+> 这些信息的唯一归宿是 GitHub 上的 Variables / Secrets —— 那才是这套 workflow
+> 存在的意义。仓库是公开的（fork 也是），写进来等于对外发布一份基础设施清单：
+> 公网 IP + SSH 用户 + 同机跑了什么 + nginx 布局，是相当完整的侦察材料。
+> 下面全部用占位符，照着填到 GitHub 上即可。
 
 ### Variables
 
 ```
-DEPLOY_HOST             = 116.62.47.225
-DEPLOY_USER             = root
+DEPLOY_HOST             = <你的服务器地址>
+DEPLOY_USER             = <SSH 用户>
 DEPLOY_PATH             = /opt/monopoly
-MONOPOLY_DOMAIN         = 116.62.47.225
-PROTOCOL                = http
-SERVER_PORT             = 8181
+MONOPOLY_DOMAIN         = <对外访问的域名或 IP>
+PROTOCOL                = http            # 有证书就填 https
+SERVER_PORT             = 8181            # 先用 ss -lntp 确认没被占用
 ICE_SERVER_PORT         = 8182
 MONOPOLY_ADMIN_PORT     = 8183
 API_BASE_PREFIX         = /monopoly-server
@@ -220,10 +224,14 @@ ICE_BASE_PREFIX         = /monopoly-ice
 ADMIN_BASE_PREFIX       = /monopoly-admin
 VITE_WEB_BASE_PATH      = /monopoly/
 WEB_ROOT                = /var/www/monopoly
-NGINX_INCLUDE_FILE      = /etc/nginx/inc/site-common.conf
-NGINX_SNIPPET_PATH      = /etc/nginx/inc/monopoly.conf
+NGINX_INCLUDE_FILE      = <被 server{} include 的那个文件>
+NGINX_SNIPPET_PATH      = <生成的片段放哪，如 /etc/nginx/inc/monopoly.conf>
+```
 
-# 1.8G 内存 + 无 swap，这几个必须收紧
+小内存机器（2G 以下、尤其无 swap）务必收紧下面这几项，否则 MySQL 首次启动叠加
+TypeORM `synchronize=true` 建表的内存峰值容易触发 OOM：
+
+```
 MYSQL_INNODB_BUFFER_POOL_SIZE = 96M
 MYSQL_MAX_CONNECTIONS         = 40
 MYSQL_MEMORY_LIMIT            = 448m
@@ -231,46 +239,61 @@ SERVER_MEMORY_LIMIT           = 448m
 MYSQL_POOL_SIZE               = 8
 ```
 
+无 swap 又真的 OOM，可以手动加（会改宿主机，workflow 不会自动做）：
+
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+```
+
 ### Secrets
 
 ```
 DEPLOY_SSH_KEY      = <部署私钥全文>
-DEPLOY_KNOWN_HOSTS  = <ssh-keyscan -H 116.62.47.225 的输出>
+DEPLOY_KNOWN_HOSTS  = <ssh-keyscan -t ed25519,ecdsa,rsa -H <你的服务器地址> 的输出>
 MYSQL_PASSWORD      = <自己定，别用引号和 # >
 TURN_SECRET         = <openssl rand -hex 24>
 MAP_ENCRYPT_KEY     = <正好 16 位>
 ```
 
-部署完访问 <http://116.62.47.225/monopoly>。
+部署完访问 `<PROTOCOL>://<MONOPOLY_DOMAIN><VITE_WEB_BASE_PATH>`。
 
-### 这台机器上 TURN 的处理
+### 目标机已有 coturn 时怎么办
 
-`deploy_coturn` 保持不勾。原因：
+如果目标机上已经跑着一个 coturn，**先确认它的认证模式**：
+
+```bash
+grep -E "use-auth-secret|lt-cred-mech" /etc/coturn/turnserver.conf
+```
 
 服务端用的是 HMAC-SHA1 动态凭证（`apps/server/src/utils/turn-credentials.ts`），
-要求 coturn 开 `use-auth-secret`；而机器上已有的 coturn 用的是 `lt-cred-mech` 静态账号。
-这两种模式在 coturn 里互斥 —— 既不能复用，也不该去改它的配置（会打断依赖它的其他服务）。
+要求 coturn 开 `use-auth-secret`。如果现有的那份用的是 `lt-cred-mech`（静态账号），
+两种模式在 coturn 里**互斥** —— 既不能复用，也不该去改它的配置（会打断依赖它的其他服务）。
+这种情况下 `deploy_coturn` 保持不勾。
 
-按上面的填法，`STUN_PORT=3478` 指向的就是现有的 coturn，**STUN 是可用的**
-（STUN binding 不需要认证），大部分家宽/同局域网场景能直连成功。
-`turns:...:5349` 那条候选会失败，浏览器会自动跳过。
+此时把 `STUN_PORT` 指向现有 coturn 的监听端口，**STUN 仍然可用**
+（STUN binding 不需要认证），大部分家宽 / 同局域网场景能直连成功；
+`turns:` 那条候选会失败，浏览器自动跳过。
 
 需要完整 TURN 中继（跨对称 NAT / 移动网络）时，两条路：
 
-1. 换端口另起一份自带 coturn：把 `STUN_PORT` / `TURN_PORT` 改成 `3479` / `5350`，
-   勾上 `deploy_coturn`，然后在阿里云安全组放行 `3479/udp`、`3479/tcp`、`5350/tcp`
-   以及中继端口段 `49160-49200/udp`。TLS 还需要往 `${DEPLOY_PATH}/coturn/certs/`
-   放 `fullchain.pem` + `privkey.pem`（IP 签不出证书，`turns:` 需要域名）。
+1. 换端口另起一份自带 coturn：把 `STUN_PORT` / `TURN_PORT` 改成未被占用的值
+   （如 `3479` / `5350`），勾上 `deploy_coturn`，然后在云安全组放行对应的
+   udp/tcp 端口以及中继端口段（`COTURN_RELAY_MIN`-`COTURN_RELAY_MAX`）。
+   TLS 还需要往 `${DEPLOY_PATH}/coturn/certs/` 放 `fullchain.pem` + `privkey.pem`
+   —— 纯 IP 签不出证书，`turns:` 必须有域名。
 2. 或者把现有 coturn 迁到 `use-auth-secret` 模式 —— 但要先确认没有别的服务在用它。
 
-### 注意事项
+### 多站点共存的注意事项
 
-- **无 swap**：MySQL 首次启动 + TypeORM `synchronize=true` 建表那一阵内存是峰值。
-  真遇到 OOM 就加 swap：`fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`
-  （这会改宿主机，workflow 不会自动做）。
-- **nginx 有个已存在的告警**：`conflicting server name "116.62.47.225" on 0.0.0.0:80, ignored`
-  —— `chatjudge.conf` 和 `jewstd.conf` 都为这个 IP 定义了 server 块，`jewstd.conf` 那个被忽略。
-  这是部署前就有的状况，本 workflow 没碰它。我们的 location 片段进的是生效的那个（`site-common.conf`）。
+目标机的 nginx 上如果已经有别的站点：
+
+- 本 workflow 只往 `NGINX_INCLUDE_FILE` 追加**一行** include，并且改动前必备份、
+  `nginx -t` 不通过就自动回滚且不 reload，现有站点不会被打断。
+- 生成的 location 全部锚定在自己的前缀上，不会抢别的站点的路由。
+- 部署前先跑一次 `nginx -t`。**如果它本来就有告警**（例如多个 conf 为同一
+  `server_name` 定义了 server 块导致 "conflicting server name ... ignored"），
+  先确认你的 `NGINX_INCLUDE_FILE` 是被**生效的那个** server 块 include 的，
+  否则片段装上去也不起作用。
 
 ## 六、验证与排查
 
@@ -296,7 +319,7 @@ docker compose logs --tail 100 mysql
 curl -i http://127.0.0.1:8181/health
 
 # 走 nginx（必须带 Host，机器上有多个 server 块）
-curl -i -H 'Host: 116.62.47.225' http://127.0.0.1/monopoly-server/health
+curl -i -H "Host: $MONOPOLY_DOMAIN" http://127.0.0.1/monopoly-server/health
 
 # 看生效的 nginx 配置
 nginx -T | grep -A5 monopoly
@@ -316,8 +339,8 @@ docker compose up -d
 rm -rf /var/www/monopoly && mv /var/www/monopoly.old /var/www/monopoly
 
 # nginx 配置：每次改动前都有带时间戳的备份
-ls /etc/nginx/inc/*.bak-*
-cp /etc/nginx/inc/site-common.conf.bak-<时间戳> /etc/nginx/inc/site-common.conf
+ls "$NGINX_INCLUDE_FILE".bak-* "$NGINX_SNIPPET_PATH".bak-*
+cp "$NGINX_INCLUDE_FILE".bak-<时间戳> "$NGINX_INCLUDE_FILE"
 nginx -t && systemctl reload nginx
 ```
 

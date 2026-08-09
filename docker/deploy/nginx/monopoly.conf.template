@@ -1,11 +1,10 @@
 # MineMonopoly nginx location 片段 —— 由 .github/workflows/deploy-server.yml 生成并同步。
 #
-# 这个文件只含 location / server 级指令，没有 server{}，因为它是被 include 进已有的
-# server{} 块里的（目标机上是 /etc/nginx/inc/site-common.conf，被 chatjudge.conf 的两个
-# server 块 include）。**不要手改服务器上的副本** —— 改仓库里这个模板然后重跑 workflow。
+# 这个文件只含 location / server 级指令，没有 server{}，因为它是被 include 进目标机上
+# 已有的 server{} 块里的（由 repo variable NGINX_INCLUDE_FILE 指定）。
+# **不要手改服务器上的副本** —— 改仓库里这个模板然后重跑 workflow。
 #
-# 所有 location 都锚定在自己的前缀上，不会影响同一 server 块里已有的
-# /chatjudge、/GameSimulator、/amongai、/interleaf 等站点。
+# 所有 location 都锚定在自己的前缀上，不会影响同一 server 块里已有的其他站点。
 #
 # 占位符由 workflow 用 sed 替换：
 #   __WEB_BASE_PATH__     客户端 web 访问路径，带首尾斜杠，如 /monopoly/
