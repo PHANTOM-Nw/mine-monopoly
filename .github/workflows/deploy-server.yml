@@ -9,7 +9,14 @@ name: Deploy Server
 # 流程：
 #   build-image  在 CI 里构建服务端镜像推到 GHCR（目标机 1.8G 内存，跑不动本地构建）
 #   build-web    在 CI 里构建客户端 web 产物（域名/前缀是编译期注入的，必须在 CI 构建）
-#   deploy       SSH 到目标机：拉镜像起容器 → 发布静态产物 → 装 nginx 片段 → 自检
+#   deploy       SSH 到目标机：送镜像起容器 → 发布静态产物 → 装 nginx 片段 → 自检
+#
+# 镜像怎么到目标机（IMAGE_TRANSPORT）：
+#   ssh（默认）  CI 拉好镜像后 docker save | gzip | ssh docker load 推过去。
+#                目标机全程不连任何 registry，也就不需要 GHCR 凭据 ——
+#                国内机器拉 ghcr.io 的 blob（pkg-containers.githubusercontent.com）
+#                经常传一半断流，这条路绕开了它。
+#   registry     目标机自己 docker compose pull。带宽好、镜像大时更省 CI 时间。
 
 on:
   workflow_dispatch:
@@ -53,6 +60,7 @@ jobs:
       mysql_image: ${{ steps.image.outputs.mysql_image }}
       mysql_source: ${{ steps.image.outputs.mysql_source }}
       mysql_mirror: ${{ steps.image.outputs.mysql_mirror }}
+      transport: ${{ steps.image.outputs.transport }}
     steps:
       - name: Check Required Variables & Secrets
         env:
@@ -112,18 +120,32 @@ jobs:
           echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
           echo "服务端镜像：${base}-server:sha-${GITHUB_SHA::12}"
 
-          # ── MySQL 镜像：默认转存一份到 GHCR ──
-          # 很多云主机（尤其国内）连不上 registry-1.docker.io，直接用 mysql:8.0
-          # 会在服务器上 pull 超时。CI 这边能连 Docker Hub，所以让 CI 把它拷到
-          # GHCR，服务器只从 GHCR 拉，全程不碰 Docker Hub。
+          # ── 镜像怎么送到目标机 ──
+          transport="${{ vars.IMAGE_TRANSPORT || 'ssh' }}"
+          case "$transport" in
+            ssh|registry) ;;
+            *) echo "::error::IMAGE_TRANSPORT 只能是 ssh 或 registry，当前是 '${transport}'"; exit 1 ;;
+          esac
+          echo "transport=${transport}" >> "$GITHUB_OUTPUT"
+          echo "镜像投递方式：${transport}"
+
           src="${{ vars.MYSQL_IMAGE || 'mysql:8.0' }}"
           echo "mysql_source=${src}" >> "$GITHUB_OUTPUT"
 
-          mirror="${{ vars.MYSQL_MIRROR_TO_GHCR || 'true' }}"
-          # 已经是 GHCR 上的镜像就没必要再拷一次
-          case "$src" in
-            ghcr.io/*) mirror=false ;;
-          esac
+          # ── MySQL 镜像：registry 模式下转存一份到 GHCR ──
+          # 很多云主机（尤其国内）连不上 registry-1.docker.io，直接用 mysql:8.0
+          # 会在服务器上 pull 超时。CI 这边能连 Docker Hub，所以让 CI 把它拷到
+          # GHCR，服务器只从 GHCR 拉，全程不碰 Docker Hub。
+          # ssh 模式下目标机根本不连 registry，这层转存就是多余的。
+          if [ "$transport" = "ssh" ]; then
+            mirror=false
+          else
+            mirror="${{ vars.MYSQL_MIRROR_TO_GHCR || 'true' }}"
+            # 已经是 GHCR 上的镜像就没必要再拷一次
+            case "$src" in
+              ghcr.io/*) mirror=false ;;
+            esac
+          fi
 
           if [ "$mirror" != "true" ]; then
             echo "mysql_mirror=false" >> "$GITHUB_OUTPUT"
@@ -270,6 +292,8 @@ jobs:
     env:
       SERVER_IMAGE: ${{ needs.preflight.outputs.image_repo }}:${{ needs.preflight.outputs.image_tag }}
       IMAGE_REPO: ${{ needs.preflight.outputs.image_repo }}
+      MYSQL_IMAGE: ${{ needs.preflight.outputs.mysql_image }}
+      IMAGE_TRANSPORT: ${{ needs.preflight.outputs.transport }}
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER }}
       DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
@@ -351,6 +375,10 @@ jobs:
           docker compose version >/dev/null 2>&1 || { echo "缺少 docker compose v2 插件"; fail=1; }
           [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null || {
             echo "既不是 root 也没有免密 sudo —— 需要能改 nginx 配置与 reload"; fail=1; }
+          # CI 构建/传输的都是 amd64 镜像。架构不符时 docker load 会成功、
+          # 容器起来才报 exec format error，很难查，所以在这里就拦掉。
+          arch="$(uname -m)"
+          [ "$arch" = "x86_64" ] || { echo "目标机架构是 ${arch}，但 CI 产出的是 amd64 镜像"; fail=1; }
           echo "--- 内存 ---"; free -m | head -2
           echo "--- 磁盘 ---"; df -h /var/lib/docker | tail -1
           exit $fail
@@ -443,6 +471,8 @@ jobs:
           GHCR_PERSIST_LOGIN='$([ -n "$GHCR_PAT" ] && echo true || echo false)'
           IMAGE_KEEP='${{ vars.IMAGE_KEEP || '3' }}'
           HEALTH_TIMEOUT='${{ vars.HEALTH_TIMEOUT || '300' }}'
+          IMAGE_TRANSPORT='${IMAGE_TRANSPORT}'
+          PULL_RETRIES='${{ vars.PULL_RETRIES || '4' }}'
 
           DEPLOY_WEB='${{ inputs.deploy_web }}'
           UPDATE_NGINX='${{ inputs.update_nginx }}'
@@ -464,10 +494,17 @@ jobs:
           EOF
 
           # ---------- GHCR 拉取凭据 ----------
+          # 只有 registry 模式才需要 —— ssh 模式下镜像是 CI 推过去的，
+          # 目标机不连 registry，凭据也就没必要落到那台机器上。
           # 有 GHCR_PAT 就用它（长期有效，重启后还能 pull）；否则用本次 run 的
           # GITHUB_TOKEN（一次性，remote-apply.sh 用完会 docker logout）。
-          printf '%s' "${GHCR_PAT:-$GITHUB_TOKEN}" > "$BUNDLE/.ghcr-token"
-          chmod 600 "$BUNDLE/.ghcr-token"
+          # 注意 rsync --delete 会顺手清掉目标机上遗留的旧 .ghcr-token。
+          if [ "$IMAGE_TRANSPORT" = "registry" ]; then
+            printf '%s' "${GHCR_PAT:-$GITHUB_TOKEN}" > "$BUNDLE/.ghcr-token"
+            chmod 600 "$BUNDLE/.ghcr-token"
+          else
+            echo "ssh 模式：不下发 GHCR 凭据到目标机"
+          fi
 
           # ---------- 渲染 nginx 片段 ----------
           sed -e "s|__WEB_BASE_PATH__|${WEB_BASE}|g" \
@@ -551,6 +588,39 @@ jobs:
           ssh deploy-target "rm -rf '${WEB_ROOT}.incoming' && mkdir -p '${WEB_ROOT}.incoming'"
           rsync -az --delete -e "ssh" "$RUNNER_TEMP/web"/ "deploy-target:${WEB_ROOT}.incoming/"
           ssh deploy-target "du -sh '${WEB_ROOT}.incoming'"
+
+      # ── 把镜像直接推到目标机，绕开 registry ──
+      # docker save 出来的是未压缩 tar（服务端镜像约 500MB），必须压着传。
+      # 用 gzip 而不是 zstd：docker load 对 gzip/bzip2/xz 的自动解压是老能力，
+      # zstd 要看目标机 docker 版本，不值得为这点压缩率赌。
+      - name: Ship Images to Remote
+        if: ${{ needs.preflight.outputs.transport == 'ssh' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 服务端镜像在 GHCR 上（build-image job 推的），这一步的 runner 还没登录
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+          images=("$SERVER_IMAGE" "$MYSQL_IMAGE")
+          if [ '${{ inputs.deploy_coturn }}' = 'true' ]; then
+            # 自带 coturn 时它也得走同一条路，否则目标机又要去连 Docker Hub
+            images+=("coturn/coturn:debian")
+          fi
+
+          for img in "${images[@]}"; do
+            # sha-xxx / 固定 tag 都是不可变的，目标机已经有就不用再传一遍
+            if ssh deploy-target "docker image inspect '${img}' >/dev/null 2>&1"; then
+              echo "跳过 ${img}（目标机已有）"
+              continue
+            fi
+            echo "::group::传输 ${img}"
+            docker pull -q "$img"
+            size="$(docker image inspect "$img" --format '{{.Size}}')"
+            echo "解压后 $((size / 1000000))MB，压缩后传输"
+            docker save "$img" | gzip -1 | ssh deploy-target 'docker load'
+            echo "::endgroup::"
+          done
 
       - name: Apply on Remote
         run: |
