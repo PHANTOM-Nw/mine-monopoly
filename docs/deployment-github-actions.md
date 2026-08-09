@@ -170,6 +170,16 @@ ssh -i ~/.ssh/<已有可用密钥> root@<IP> \
 
 ## 四、跑一次部署
 
+### 两个前置条件
+
+1. **workflow 文件必须在默认分支上。** `workflow_dispatch` 只认默认分支里的
+   workflow —— 文件还在特性分支时，Actions 页面**根本不会出现 `Deploy Server`**。
+   先把 PR 合进 `main`。（合进去之后，运行时仍可在分支选择器里挑任意分支部署。）
+2. **fork 仓库的 Actions 默认是禁用的。** 去 `Settings → Actions → General`
+   打开（页面上会有一个 "I understand my workflows, go ahead and enable them"）。
+
+### 运行
+
 `Actions → Deploy Server → Run workflow`
 
 | 输入 | 默认 | 说明 |
