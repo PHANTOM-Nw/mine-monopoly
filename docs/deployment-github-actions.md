@@ -34,6 +34,17 @@ MONOPOLY_ADMIN_PORT 都在云安全组里放行。路径模式全部走已经开
 **为什么镜像在 CI 构建**：小规格云主机（1～2G 内存）跑不动这个 monorepo 的构建，
 而且 admin 前端的编译期变量本来就该由 CI 注入。
 
+**为什么 MySQL 镜像也要经过 GHCR**：很多云主机（尤其国内）连不上
+`registry-1.docker.io`，直接用 `mysql:8.0` 会在服务器上 pull 超时导致部署失败。
+CI 那边能连 Docker Hub，所以 `build-image` 里用
+`docker buildx imagetools create` 把它**原样拷一份到 GHCR**（registry 到 registry
+的 manifest 拷贝，不落地到 runner 磁盘，保留多架构 manifest），服务器只从 GHCR 拉，
+全程不碰 Docker Hub。目标机因此只需要能访问 `ghcr.io` 一个域名。
+
+要关掉这个行为（比如你的机器本来就能连 Docker Hub，或想用云厂商的镜像源），
+把 variable `MYSQL_MIRROR_TO_GHCR` 设成 `false`；`MYSQL_IMAGE` 本身填 `ghcr.io/...`
+开头的值时也会自动跳过转存。
+
 ## 一、准备目标服务器
 
 只需要三样东西，其余全由 workflow 处理：
@@ -121,7 +132,8 @@ nginx -T | grep -n "include\|server_name"
 | `MYSQL_PORT` | `3306` | |
 | `MYSQL_DATABASE` | `monopoly` | ⚠ `dbConnecter.ts` 把库名硬编码成 `monopoly`，改这个不生效 |
 | `MYSQL_USERNAME` | `root` | 非 root 时首次初始化会自动建号授权 |
-| `MYSQL_IMAGE` | `mysql:8.0` | 别升到 8.4，`my.cnf` 里的老参数在 8.4 会启动失败 |
+| `MYSQL_IMAGE` | `mysql:8.0` | 别升到 8.4，`my.cnf` 里的老参数在 8.4 会启动失败。CI 会把它转存到 GHCR，见下 |
+| `MYSQL_MIRROR_TO_GHCR` | `true` | 是否把 MySQL 镜像转存到 GHCR。目标机连不上 Docker Hub 时必须开着（默认） |
 | `MYSQL_INNODB_BUFFER_POOL_SIZE` | `96M` | 小内存机器的关键参数 |
 | `MYSQL_MAX_CONNECTIONS` | `60` | |
 | `MYSQL_MEMORY_LIMIT` | `512m` | 容器内存上限 |

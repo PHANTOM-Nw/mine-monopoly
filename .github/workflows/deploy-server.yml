@@ -50,6 +50,9 @@ jobs:
     outputs:
       image_repo: ${{ steps.image.outputs.repo }}
       image_tag: ${{ steps.image.outputs.tag }}
+      mysql_image: ${{ steps.image.outputs.mysql_image }}
+      mysql_source: ${{ steps.image.outputs.mysql_source }}
+      mysql_mirror: ${{ steps.image.outputs.mysql_mirror }}
     steps:
       - name: Check Required Variables & Secrets
         env:
@@ -104,10 +107,39 @@ jobs:
         id: image
         run: |
           # GHCR 的 repository 部分必须全小写
-          repo="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-server"
-          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          base="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "repo=${base}-server" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
-          echo "镜像：${repo}:sha-${GITHUB_SHA::12}"
+          echo "服务端镜像：${base}-server:sha-${GITHUB_SHA::12}"
+
+          # ── MySQL 镜像：默认转存一份到 GHCR ──
+          # 很多云主机（尤其国内）连不上 registry-1.docker.io，直接用 mysql:8.0
+          # 会在服务器上 pull 超时。CI 这边能连 Docker Hub，所以让 CI 把它拷到
+          # GHCR，服务器只从 GHCR 拉，全程不碰 Docker Hub。
+          src="${{ vars.MYSQL_IMAGE || 'mysql:8.0' }}"
+          echo "mysql_source=${src}" >> "$GITHUB_OUTPUT"
+
+          mirror="${{ vars.MYSQL_MIRROR_TO_GHCR || 'true' }}"
+          # 已经是 GHCR 上的镜像就没必要再拷一次
+          case "$src" in
+            ghcr.io/*) mirror=false ;;
+          esac
+
+          if [ "$mirror" != "true" ]; then
+            echo "mysql_mirror=false" >> "$GITHUB_OUTPUT"
+            echo "mysql_image=${src}" >> "$GITHUB_OUTPUT"
+            echo "MySQL 镜像：${src}（不转存）"
+          else
+            # 取 tag 部分作为 GHCR 上的 tag；没写 tag 就当 latest
+            case "$src" in
+              *:*) mtag="${src##*:}" ;;
+              *)   mtag="latest" ;;
+            esac
+            dst="${base}-mysql:${mtag}"
+            echo "mysql_mirror=true" >> "$GITHUB_OUTPUT"
+            echo "mysql_image=${dst}" >> "$GITHUB_OUTPUT"
+            echo "MySQL 镜像：${src} → 转存到 ${dst}"
+          fi
 
   # ── 服务端镜像 → GHCR ──
   build-image:
@@ -124,6 +156,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 把 MySQL 官方镜像原样拷一份到 GHCR，这样目标机不需要能连 Docker Hub。
+      # imagetools create 是 registry→registry 的 manifest 拷贝：不落地到 runner 磁盘，
+      # 而且保留原有的多架构 manifest list。
+      - name: Mirror MySQL Image to GHCR
+        if: ${{ needs.preflight.outputs.mysql_mirror == 'true' }}
+        run: |
+          SRC='${{ needs.preflight.outputs.mysql_source }}'
+          DST='${{ needs.preflight.outputs.mysql_image }}'
+          echo "拷贝 ${SRC} → ${DST}"
+          docker buildx imagetools create --tag "$DST" "$SRC"
+          echo "--- 校验目标镜像可读 ---"
+          docker buildx imagetools inspect "$DST" | head -20
 
       - name: Build & Push
         uses: docker/build-push-action@v6
@@ -357,7 +402,9 @@ jobs:
           MYSQL_USERNAME=${{ vars.MYSQL_USERNAME || 'root' }}
           MYSQL_PASSWORD=${MYSQL_PASSWORD}
           MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-$MYSQL_PASSWORD}
-          MYSQL_IMAGE=${{ vars.MYSQL_IMAGE || 'mysql:8.0' }}
+          # 用 preflight 解析出来的值：默认是 GHCR 上的转存副本，
+          # 目标机因此不需要能连 registry-1.docker.io
+          MYSQL_IMAGE=${{ needs.preflight.outputs.mysql_image }}
           MYSQL_POOL_SIZE=${{ vars.MYSQL_POOL_SIZE || '10' }}
           MYSQL_ACQUIRE_TIMEOUT=${{ vars.MYSQL_ACQUIRE_TIMEOUT || '30000' }}
           MYSQL_INNODB_BUFFER_POOL_SIZE=${{ vars.MYSQL_INNODB_BUFFER_POOL_SIZE || '96M' }}
