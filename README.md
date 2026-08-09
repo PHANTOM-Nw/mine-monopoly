@@ -292,11 +292,19 @@ docker compose -f docker/docker-compose.yml up -d
 
 服务器通过外部 Docker 网络 (`monopoly-network`) 与 MySQL 通信，启动前请确保 MySQL 在该网络中可访问。
 
+### 用 GitHub Actions 部署到自有服务器
+
+不想手动 SSH 上去操作的话，用 `Actions → Deploy Server` 一键部署：CI 构建服务端镜像推到 GHCR，
+再 SSH 到目标机拉镜像起容器、发布客户端 web 产物、配置 nginx 反代并自检。自带 MySQL，
+所有环境变量都从 repo 的 Variables / Secrets 读取。详见
+[GitHub Actions 部署指南](docs/deployment-github-actions.md)。
+
 ## 文档
 
 | 文档                                          | 说明                         |
 | --------------------------------------------- | ---------------------------- |
 | [开发指南](docs/development-guide.md)         | 架构设计、核心概念、编码规范 |
+| [GitHub Actions 部署](docs/deployment-github-actions.md) | 部署到自有服务器、变量清单 |
 | [游戏进程 API](docs/game-process-api.md)      | effectCode 公开 API 参考     |
 | [修饰器系统 API](docs/api/modifier-system.md) | 修饰器模板用法与迁移指南     |
 | [AGENTS.md](AGENTS.md)                        | AI Agent 项目约定            |

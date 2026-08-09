@@ -1,0 +1,577 @@
+name: Deploy Server
+
+# 把服务端（API + ICE 信令 + Admin 后台 + MySQL）和客户端 web 静态产物部署到一台
+# 自有服务器上。所有环境相关配置都来自 repo / environment 的 Variables 与 Secrets，
+# 仓库里不存任何一台机器的具体地址或密码 —— 换机器只改 GitHub 上的配置，不改代码。
+#
+# 完整变量清单见 docs/deployment-github-actions.md
+#
+# 流程：
+#   build-image  在 CI 里构建服务端镜像推到 GHCR（目标机 1.8G 内存，跑不动本地构建）
+#   build-web    在 CI 里构建客户端 web 产物（域名/前缀是编译期注入的，必须在 CI 构建）
+#   deploy       SSH 到目标机：拉镜像起容器 → 发布静态产物 → 装 nginx 片段 → 自检
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '用哪一套配置（GitHub Environment；未配置 environment 级变量时自动回落到 repo 级）'
+        type: choice
+        options:
+          - production
+          - staging
+        default: production
+      deploy_web:
+        description: '同时部署客户端 web 静态产物'
+        type: boolean
+        default: true
+      update_nginx:
+        description: '写入 / 更新 nginx location 片段并 reload'
+        type: boolean
+        default: true
+      deploy_coturn:
+        description: '同时启动自带 coturn（目标机已有 coturn 占用 3478/5349 时不要勾）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-server-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 预检：把配置错误在花时间构建之前暴露出来 ──
+  preflight:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      image_repo: ${{ steps.image.outputs.repo }}
+      image_tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - name: Check Required Variables & Secrets
+        env:
+          # 变量（非敏感）
+          V_MONOPOLY_DOMAIN: ${{ vars.MONOPOLY_DOMAIN }}
+          V_PROTOCOL: ${{ vars.PROTOCOL }}
+          V_SERVER_PORT: ${{ vars.SERVER_PORT }}
+          V_ICE_SERVER_PORT: ${{ vars.ICE_SERVER_PORT }}
+          V_MONOPOLY_ADMIN_PORT: ${{ vars.MONOPOLY_ADMIN_PORT }}
+          V_DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          # 主机信息允许放 Variables 或 Secrets
+          V_DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
+          V_DEPLOY_USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER }}
+          # 密钥
+          S_DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          S_MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          S_TURN_SECRET: ${{ secrets.TURN_SECRET }}
+          S_MAP_ENCRYPT_KEY: ${{ secrets.MAP_ENCRYPT_KEY }}
+        run: |
+          missing=()
+          for name in V_MONOPOLY_DOMAIN V_PROTOCOL V_SERVER_PORT V_ICE_SERVER_PORT \
+                      V_MONOPOLY_ADMIN_PORT V_DEPLOY_PATH V_DEPLOY_HOST V_DEPLOY_USER; do
+            [ -n "${!name}" ] || missing+=("variable ${name#V_}")
+          done
+          for name in S_DEPLOY_SSH_KEY S_MYSQL_PASSWORD S_TURN_SECRET S_MAP_ENCRYPT_KEY; do
+            [ -n "${!name}" ] || missing+=("secret ${name#S_}")
+          done
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::以下配置还没填，见 docs/deployment-github-actions.md"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          # MAP_ENCRYPT_KEY 必须正好 16 个 ASCII 字符，否则地图解密在运行时才炸
+          key_len=${#S_MAP_ENCRYPT_KEY}
+          if [ "$key_len" -ne 16 ]; then
+            echo "::error::MAP_ENCRYPT_KEY 长度是 ${key_len}，必须正好 16 位"
+            exit 1
+          fi
+
+          if [ "$V_PROTOCOL" != "http" ] && [ "$V_PROTOCOL" != "https" ]; then
+            echo "::error::PROTOCOL 只能是 http 或 https，当前是 '${V_PROTOCOL}'"
+            exit 1
+          fi
+          echo "预检通过"
+
+      - name: Resolve Image Name
+        id: image
+        run: |
+          # GHCR 的 repository 部分必须全小写
+          repo="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-server"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "镜像：${repo}:sha-${GITHUB_SHA::12}"
+
+  # ── 服务端镜像 → GHCR ──
+  build-image:
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ needs.preflight.outputs.image_repo }}:${{ needs.preflight.outputs.image_tag }}
+            ${{ needs.preflight.outputs.image_repo }}:${{ inputs.environment }}
+          # admin 前端的编译期变量。注意这里刻意不传 MAP_ENCRYPT_KEY ——
+          # app.ts 的 /env.js 会在运行时注入它，而 browser.ts 里运行时值优先于编译期值，
+          # 所以没必要把密钥烧进镜像层（镜像 history 是可读的）。
+          build-args: |
+            PROTOCOL=${{ vars.PROTOCOL }}
+            MONOPOLY_DOMAIN=${{ vars.MONOPOLY_DOMAIN }}
+            SERVER_PORT=${{ vars.SERVER_PORT }}
+            API_BASE_PREFIX=${{ vars.API_BASE_PREFIX }}
+            ADMIN_BASE_PREFIX=${{ vars.ADMIN_BASE_PREFIX }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 客户端 web 静态产物 ──
+  # 域名 / 协议 / 路径前缀是被 vite-plugin-env 在编译期烧进 bundle 的，
+  # 所以必须在这里用目标环境的配置构建，不能复用别的环境的产物。
+  build-web:
+    needs: preflight
+    if: ${{ inputs.deploy_web }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @mine-monopoly/env run build
+
+      - name: Create .env for Web Build
+        env:
+          MAP_ENCRYPT_KEY: ${{ secrets.MAP_ENCRYPT_KEY }}
+          TC_ID: ${{ secrets.TC_ID }}
+          TC_KEY: ${{ secrets.TC_KEY }}
+        run: |
+          # ⚠ 只写浏览器可见也无所谓的变量。
+          # vite-plugin-env 的 exclude 在 client/vite.config.ts 里被覆盖成
+          # ["MYSQL_PASSWORD","TC_KEY"]，也就是说除这两个之外的变量都会被烧进
+          # 前端 bundle。因此 TURN_SECRET / MYSQL_* 绝不能出现在这个 .env 里。
+          # MAP_ENCRYPT_KEY 是客户端解密地图产物必需的，本身就是公开设计。
+          cat > .env << EOF
+          PROTOCOL=${{ vars.PROTOCOL }}
+          MONOPOLY_DOMAIN=${{ vars.MONOPOLY_DOMAIN }}
+          API_BASE_PREFIX=${{ vars.API_BASE_PREFIX }}
+          ICE_BASE_PREFIX=${{ vars.ICE_BASE_PREFIX }}
+          ADMIN_BASE_PREFIX=${{ vars.ADMIN_BASE_PREFIX }}
+          SERVER_PORT=${{ vars.SERVER_PORT }}
+          ICE_SERVER_PORT=${{ vars.ICE_SERVER_PORT }}
+          MONOPOLY_ADMIN_PORT=${{ vars.MONOPOLY_ADMIN_PORT }}
+          MAP_ENCRYPT_KEY=${MAP_ENCRYPT_KEY}
+          TC_BUCKET_NAME=${{ vars.TC_BUCKET_NAME }}
+          TC_REGION=${{ vars.TC_REGION }}
+          TC_ID=${TC_ID}
+          NODE_ENV=production
+          EOF
+          echo "写入 $(grep -c '=' .env) 条变量（不含 TURN_SECRET / MYSQL_*）"
+
+      - name: Build Web
+        env:
+          # vite.config.ts 读的是 process.env.VITE_WEB_BASE_PATH，
+          # 而 vite-plugin-env 会跳过 VITE_ 前缀，所以必须用真实环境变量传。
+          VITE_WEB_BASE_PATH: ${{ vars.VITE_WEB_BASE_PATH || '/monopoly/' }}
+        run: pnpm --filter @mine-monopoly/client run build:web
+
+      - name: Package Artifact
+        run: |
+          test -f apps/client/dist/frontend/index.html
+          tar -czf web-dist.tar.gz -C apps/client/dist/frontend .
+          ls -lh web-dist.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-web-dist
+          path: web-dist.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  # ── SSH 部署 ──
+  deploy:
+    needs: [preflight, build-image, build-web]
+    if: ${{ always() && needs.build-image.result == 'success' && (needs.build-web.result == 'success' || needs.build-web.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      SERVER_IMAGE: ${{ needs.preflight.outputs.image_repo }}:${{ needs.preflight.outputs.image_tag }}
+      IMAGE_REPO: ${{ needs.preflight.outputs.image_repo }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      WEB_ROOT: ${{ vars.WEB_ROOT || '/var/www/monopoly' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.deploy_web }}
+        with:
+          name: client-web-dist
+
+      - name: Normalize Paths
+        id: paths
+        run: |
+          # web base path 统一成带首尾斜杠的形式，并额外给一个去掉尾斜杠的版本
+          raw="${{ vars.VITE_WEB_BASE_PATH || '/monopoly/' }}"
+          raw="${raw#/}"; raw="${raw%/}"
+          echo "web_base=/${raw}/" >> "$GITHUB_OUTPUT"
+          echo "web_base_noslash=/${raw}" >> "$GITHUB_OUTPUT"
+
+          # 路径前缀必须形如 /xxx（app.ts 对 ADMIN_BASE_PREFIX 有同样的校验）
+          for pair in "API_BASE_PREFIX=${{ vars.API_BASE_PREFIX }}" \
+                      "ICE_BASE_PREFIX=${{ vars.ICE_BASE_PREFIX }}" \
+                      "ADMIN_BASE_PREFIX=${{ vars.ADMIN_BASE_PREFIX }}"; do
+            name="${pair%%=*}"; value="${pair#*=}"
+            if [ -z "$value" ]; then
+              echo "::error::${name} 不能为空 —— 目标机走 nginx 路径反代模式（端口模式需要额外开放云安全组端口）"
+              exit 1
+            fi
+            case "$value" in
+              /*[!/]) ;;
+              *) echo "::error::${name}='${value}' 格式不对，应形如 /monopoly-server（有首斜杠、无尾斜杠）"; exit 1 ;;
+            esac
+          done
+
+      - name: Setup SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          if [ -n "$DEPLOY_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            echo "使用 DEPLOY_KNOWN_HOSTS 校验主机指纹"
+          else
+            echo "::warning::未配置 DEPLOY_KNOWN_HOSTS，退化为首次连接信任（TOFU）。建议把 ssh-keyscan 结果存成 secret。"
+            ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+          cat > ~/.ssh/config << EOF
+          Host deploy-target
+            HostName ${DEPLOY_HOST}
+            User ${DEPLOY_USER}
+            Port ${DEPLOY_PORT}
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+            ConnectTimeout 15
+          EOF
+          chmod 600 ~/.ssh/config
+
+          ssh deploy-target 'echo "SSH ok: $(whoami)@$(hostname)"'
+
+      - name: Check Remote Prerequisites
+        run: |
+          ssh deploy-target 'bash -s' << 'EOF'
+          set -e
+          fail=0
+          for c in docker rsync curl nginx; do
+            command -v "$c" >/dev/null || { echo "缺少命令：$c"; fail=1; }
+          done
+          docker compose version >/dev/null 2>&1 || { echo "缺少 docker compose v2 插件"; fail=1; }
+          [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null || {
+            echo "既不是 root 也没有免密 sudo —— 需要能改 nginx 配置与 reload"; fail=1; }
+          echo "--- 内存 ---"; free -m | head -2
+          echo "--- 磁盘 ---"; df -h /var/lib/docker | tail -1
+          exit $fail
+          EOF
+
+      - name: Render Deploy Bundle
+        env:
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          TURN_SECRET: ${{ secrets.TURN_SECRET }}
+          MAP_ENCRYPT_KEY: ${{ secrets.MAP_ENCRYPT_KEY }}
+          TC_ID: ${{ secrets.TC_ID }}
+          TC_KEY: ${{ secrets.TC_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          WEB_BASE: ${{ steps.paths.outputs.web_base }}
+          WEB_BASE_NOSLASH: ${{ steps.paths.outputs.web_base_noslash }}
+        run: |
+          set -euo pipefail
+          BUNDLE="$RUNNER_TEMP/bundle"
+          mkdir -p "$BUNDLE"
+          cp -a docker/deploy/. "$BUNDLE/"
+          chmod +x "$BUNDLE/remote-apply.sh" "$BUNDLE/mysql/init/"*.sh
+
+          # ---------- 应用运行时 .env（docker compose 自己解析，不经过 shell） ----------
+          # 值不加引号：compose v2 会读到行尾。请避免在密码里使用 " ' # 与换行。
+          cat > "$BUNDLE/.env" << EOF
+          # 由 .github/workflows/deploy-server.yml 生成，请勿手改
+          SERVER_IMAGE=${SERVER_IMAGE}
+
+          MONOPOLY_DOMAIN=${{ vars.MONOPOLY_DOMAIN }}
+          PROTOCOL=${{ vars.PROTOCOL }}
+          API_BASE_PREFIX=${{ vars.API_BASE_PREFIX }}
+          ICE_BASE_PREFIX=${{ vars.ICE_BASE_PREFIX }}
+          ADMIN_BASE_PREFIX=${{ vars.ADMIN_BASE_PREFIX }}
+
+          SERVER_PORT=${{ vars.SERVER_PORT }}
+          ICE_SERVER_PORT=${{ vars.ICE_SERVER_PORT }}
+          MONOPOLY_ADMIN_PORT=${{ vars.MONOPOLY_ADMIN_PORT }}
+          BIND_ADDRESS=${{ vars.BIND_ADDRESS || '127.0.0.1' }}
+
+          NODE_ENV=production
+          TZ=${{ vars.TZ || 'Asia/Shanghai' }}
+
+          # MySQL —— MYSQL_HOST 必须是 compose 里的服务名 mysql
+          MYSQL_HOST=${{ vars.MYSQL_HOST || 'mysql' }}
+          MYSQL_PORT=${{ vars.MYSQL_PORT || '3306' }}
+          MYSQL_DATABASE=${{ vars.MYSQL_DATABASE || 'monopoly' }}
+          MYSQL_USERNAME=${{ vars.MYSQL_USERNAME || 'root' }}
+          MYSQL_PASSWORD=${MYSQL_PASSWORD}
+          MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-$MYSQL_PASSWORD}
+          MYSQL_IMAGE=${{ vars.MYSQL_IMAGE || 'mysql:8.0' }}
+          MYSQL_POOL_SIZE=${{ vars.MYSQL_POOL_SIZE || '10' }}
+          MYSQL_ACQUIRE_TIMEOUT=${{ vars.MYSQL_ACQUIRE_TIMEOUT || '30000' }}
+          MYSQL_INNODB_BUFFER_POOL_SIZE=${{ vars.MYSQL_INNODB_BUFFER_POOL_SIZE || '96M' }}
+          MYSQL_MAX_CONNECTIONS=${{ vars.MYSQL_MAX_CONNECTIONS || '60' }}
+          MYSQL_MEMORY_LIMIT=${{ vars.MYSQL_MEMORY_LIMIT || '512m' }}
+          SERVER_MEMORY_LIMIT=${{ vars.SERVER_MEMORY_LIMIT || '512m' }}
+
+          # TURN / STUN
+          TURN_URL=${{ vars.TURN_URL || vars.MONOPOLY_DOMAIN }}
+          TURN_PORT=${{ vars.TURN_PORT || '5349' }}
+          STUN_PORT=${{ vars.STUN_PORT || '3478' }}
+          TURN_TTL=${{ vars.TURN_TTL || '86400' }}
+          TURN_SECRET=${TURN_SECRET}
+          EXTERNAL_IP=${{ vars.EXTERNAL_IP || vars.MONOPOLY_DOMAIN }}
+          COTURN_METRICS_URL=${{ vars.COTURN_METRICS_URL || 'http://host.docker.internal:9641/metrics' }}
+          COTURN_CERTS_PATH=${{ vars.COTURN_CERTS_PATH || './coturn/certs' }}
+
+          # 存储
+          MAP_ENCRYPT_KEY=${MAP_ENCRYPT_KEY}
+          AVATAR_STORAGE_PATH=${{ vars.AVATAR_STORAGE_PATH || 'monopoly/user-avatar' }}
+          GAME_MAP_STORAGE_PATH=${{ vars.GAME_MAP_STORAGE_PATH || 'monopoly/game-map' }}
+          TC_ID=${TC_ID}
+          TC_KEY=${TC_KEY}
+          TC_BUCKET_NAME=${{ vars.TC_BUCKET_NAME }}
+          TC_REGION=${{ vars.TC_REGION }}
+          COS_TIMEOUT=${{ vars.COS_TIMEOUT || '60000' }}
+          EOF
+          chmod 600 "$BUNDLE/.env"
+
+          # ---------- 部署参数（remote-apply.sh 会 source，只放非敏感值） ----------
+          cat > "$BUNDLE/deploy.conf" << EOF
+          # 由 .github/workflows/deploy-server.yml 生成，请勿手改
+          SERVER_IMAGE='${SERVER_IMAGE}'
+          IMAGE_REPO='${IMAGE_REPO}'
+          GHCR_USERNAME='${{ vars.GHCR_USERNAME || github.actor }}'
+          GHCR_PERSIST_LOGIN='$([ -n "$GHCR_PAT" ] && echo true || echo false)'
+          IMAGE_KEEP='${{ vars.IMAGE_KEEP || '3' }}'
+          HEALTH_TIMEOUT='${{ vars.HEALTH_TIMEOUT || '300' }}'
+
+          DEPLOY_WEB='${{ inputs.deploy_web }}'
+          UPDATE_NGINX='${{ inputs.update_nginx }}'
+          WEB_ROOT='${WEB_ROOT}'
+          WEB_BASE_PATH='${WEB_BASE}'
+
+          NGINX_SNIPPET_PATH='${{ vars.NGINX_SNIPPET_PATH || '/etc/nginx/inc/monopoly.conf' }}'
+          NGINX_INCLUDE_FILE='${{ vars.NGINX_INCLUDE_FILE || '/etc/nginx/inc/site-common.conf' }}'
+
+          MONOPOLY_DOMAIN='${{ vars.MONOPOLY_DOMAIN }}'
+          BIND_ADDRESS='${{ vars.BIND_ADDRESS || '127.0.0.1' }}'
+          SERVER_PORT='${{ vars.SERVER_PORT }}'
+          ICE_SERVER_PORT='${{ vars.ICE_SERVER_PORT }}'
+          MONOPOLY_ADMIN_PORT='${{ vars.MONOPOLY_ADMIN_PORT }}'
+          API_BASE_PREFIX='${{ vars.API_BASE_PREFIX }}'
+          ICE_BASE_PREFIX='${{ vars.ICE_BASE_PREFIX }}'
+          ADMIN_BASE_PREFIX='${{ vars.ADMIN_BASE_PREFIX }}'
+          COMPOSE_PROFILES='$([ "${{ inputs.deploy_coturn }}" = "true" ] && echo coturn || echo "")'
+          EOF
+
+          # ---------- GHCR 拉取凭据 ----------
+          # 有 GHCR_PAT 就用它（长期有效，重启后还能 pull）；否则用本次 run 的
+          # GITHUB_TOKEN（一次性，remote-apply.sh 用完会 docker logout）。
+          printf '%s' "${GHCR_PAT:-$GITHUB_TOKEN}" > "$BUNDLE/.ghcr-token"
+          chmod 600 "$BUNDLE/.ghcr-token"
+
+          # ---------- 渲染 nginx 片段 ----------
+          sed -e "s|__WEB_BASE_PATH__|${WEB_BASE}|g" \
+              -e "s|__WEB_BASE_NOSLASH__|${WEB_BASE_NOSLASH}|g" \
+              -e "s|__WEB_ROOT__|${WEB_ROOT}|g" \
+              -e "s|__API_PREFIX__|${{ vars.API_BASE_PREFIX }}|g" \
+              -e "s|__ICE_PREFIX__|${{ vars.ICE_BASE_PREFIX }}|g" \
+              -e "s|__ADMIN_PREFIX__|${{ vars.ADMIN_BASE_PREFIX }}|g" \
+              -e "s|__UPSTREAM_HOST__|${{ vars.BIND_ADDRESS || '127.0.0.1' }}|g" \
+              -e "s|__SERVER_PORT__|${{ vars.SERVER_PORT }}|g" \
+              -e "s|__ICE_SERVER_PORT__|${{ vars.ICE_SERVER_PORT }}|g" \
+              -e "s|__ADMIN_PORT__|${{ vars.MONOPOLY_ADMIN_PORT }}|g" \
+              -e "s|__MAX_BODY_SIZE__|${{ vars.NGINX_MAX_BODY_SIZE || '50M' }}|g" \
+              "$BUNDLE/nginx/monopoly.conf.template" > "$BUNDLE/nginx/monopoly.conf"
+          rm -f "$BUNDLE/nginx/monopoly.conf.template"
+          if grep -q '__[A-Z_]*__' "$BUNDLE/nginx/monopoly.conf"; then
+            echo "::error::nginx 模板还有未替换的占位符"
+            grep -n '__[A-Z_]*__' "$BUNDLE/nginx/monopoly.conf"
+            exit 1
+          fi
+
+          # ---------- 渲染 coturn 配置 ----------
+          sed -e "s|__TURN_REALM__|${{ vars.TURN_REALM || vars.MONOPOLY_DOMAIN }}|g" \
+              -e "s|__LISTEN_PORT__|${{ vars.STUN_PORT || '3478' }}|g" \
+              -e "s|__TLS_PORT__|${{ vars.TURN_PORT || '5349' }}|g" \
+              -e "s|__EXTERNAL_IP__|${{ vars.EXTERNAL_IP || vars.MONOPOLY_DOMAIN }}|g" \
+              -e "s|__RELAY_MIN__|${{ vars.COTURN_RELAY_MIN || '49160' }}|g" \
+              -e "s|__RELAY_MAX__|${{ vars.COTURN_RELAY_MAX || '49200' }}|g" \
+              "$BUNDLE/coturn/turnserver.conf.template" > "$BUNDLE/coturn/turnserver.conf"
+          rm -f "$BUNDLE/coturn/turnserver.conf.template"
+          mkdir -p "$BUNDLE/coturn/certs"
+
+          echo "bundle 内容："
+          find "$BUNDLE" -type f | sed "s|$BUNDLE|.|" | sort
+
+      - name: Validate Compose & Nginx Syntax
+        run: |
+          BUNDLE="$RUNNER_TEMP/bundle"
+          # compose 配置能否解析（变量插值是否齐全）
+          docker compose -f "$BUNDLE/docker-compose.yml" --env-file "$BUNDLE/.env" config -q
+          echo "docker compose config ok"
+          # nginx 片段的语法：塞进一个最小 server 块里用官方镜像 nginx -t
+          mkdir -p "$RUNNER_TEMP/nginxcheck/inc" "$RUNNER_TEMP/nginxcheck/www"
+          cp "$BUNDLE/nginx/monopoly.conf" "$RUNNER_TEMP/nginxcheck/inc/monopoly.conf"
+          cat > "$RUNNER_TEMP/nginxcheck/test.conf" << 'EOF'
+          events {}
+          http {
+            server {
+              listen 8080;
+              server_name _;
+              include /etc/nginx/inc/monopoly.conf;
+            }
+          }
+          EOF
+          docker run --rm \
+            -v "$RUNNER_TEMP/nginxcheck/test.conf:/etc/nginx/nginx.conf:ro" \
+            -v "$RUNNER_TEMP/nginxcheck/inc:/etc/nginx/inc:ro" \
+            nginx:1.27-alpine nginx -t
+          echo "nginx 片段语法 ok"
+
+      - name: Upload Bundle
+        run: |
+          BUNDLE="$RUNNER_TEMP/bundle"
+          ssh deploy-target "mkdir -p '${DEPLOY_PATH}'"
+          # --delete 只作用于 DEPLOY_PATH。必须排除 coturn/certs ——
+          # TLS 证书是运维手动放到服务器上的，不能被 rsync 清掉。
+          rsync -az --delete \
+            --exclude 'coturn/certs/***' \
+            --exclude '*.bak-*' \
+            -e "ssh" \
+            "$BUNDLE"/ "deploy-target:${DEPLOY_PATH}/"
+          ssh deploy-target "chmod +x '${DEPLOY_PATH}/remote-apply.sh' && ls -la '${DEPLOY_PATH}'"
+
+      - name: Upload Web Artifact
+        if: ${{ inputs.deploy_web }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/web"
+          tar -xzf web-dist.tar.gz -C "$RUNNER_TEMP/web"
+          test -f "$RUNNER_TEMP/web/index.html"
+          # 先传到 .incoming，由 remote-apply.sh 做目录级原子切换
+          ssh deploy-target "rm -rf '${WEB_ROOT}.incoming' && mkdir -p '${WEB_ROOT}.incoming'"
+          rsync -az --delete -e "ssh" "$RUNNER_TEMP/web"/ "deploy-target:${WEB_ROOT}.incoming/"
+          ssh deploy-target "du -sh '${WEB_ROOT}.incoming'"
+
+      - name: Apply on Remote
+        run: |
+          ssh deploy-target "cd '${DEPLOY_PATH}' && ./remote-apply.sh"
+
+      - name: Verify Public Endpoints
+        env:
+          PROTOCOL: ${{ vars.PROTOCOL }}
+          WEB_BASE: ${{ steps.paths.outputs.web_base }}
+        run: |
+          BASE="${PROTOCOL}://${{ vars.MONOPOLY_DOMAIN }}"
+          fail=0
+          probe() {
+            local label="$1" url="$2" code
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)"
+            if [ "$code" = "200" ]; then
+              printf '  ok   %-14s %s\n' "$label" "$url"
+            else
+              printf '  FAIL %-14s %s -> %s\n' "$label" "$url" "$code"
+              fail=1
+            fi
+          }
+          probe "web"   "${BASE}${WEB_BASE}"
+          probe "api"   "${BASE}${{ vars.API_BASE_PREFIX }}/health"
+          probe "ice"   "${BASE}${{ vars.ICE_BASE_PREFIX }}/"
+          probe "admin" "${BASE}${{ vars.ADMIN_BASE_PREFIX }}/"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::公网访问校验失败。容器与 nginx 本机自检已通过的话，通常是云安全组没放行 ${PROTOCOL} 端口，或域名解析没生效。"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          PROTOCOL: ${{ vars.PROTOCOL }}
+          WEB_BASE: ${{ steps.paths.outputs.web_base }}
+        run: |
+          BASE="${PROTOCOL}://${{ vars.MONOPOLY_DOMAIN }}"
+          {
+            echo "## MineMonopoly 部署结果"
+            echo
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| environment | \`${{ inputs.environment }}\` |"
+            echo "| 镜像 | \`${SERVER_IMAGE}\` |"
+            echo "| commit | \`${GITHUB_SHA}\` |"
+            echo "| 目标机 | \`${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PORT}\` |"
+            echo "| 部署目录 | \`${DEPLOY_PATH}\` |"
+            echo
+            echo "### 访问地址"
+            echo
+            echo "- 游戏：${BASE}${WEB_BASE}"
+            echo "- API：${BASE}${{ vars.API_BASE_PREFIX }}/health"
+            echo "- 管理后台：${BASE}${{ vars.ADMIN_BASE_PREFIX }}/"
+            echo
+            echo "### 回滚"
+            echo
+            echo '```bash'
+            echo "# 服务端：改回上一个镜像 tag"
+            echo "cd ${DEPLOY_PATH} && sed -i 's|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE_REPO}:<旧tag>|' .env && docker compose up -d"
+            echo "# 客户端静态产物："
+            echo "rm -rf ${WEB_ROOT} && mv ${WEB_ROOT}.old ${WEB_ROOT}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup Credentials
+        if: always()
+        run: |
+          # apply 步骤中途失败时 token 可能还留在目标机上 —— 先清远端，再销毁本地私钥
+          if [ -f ~/.ssh/deploy_key ]; then
+            ssh deploy-target "rm -f '${DEPLOY_PATH}/.ghcr-token'" 2>/dev/null || true
+          fi
+          rm -f ~/.ssh/deploy_key ~/.ssh/config ~/.ssh/known_hosts

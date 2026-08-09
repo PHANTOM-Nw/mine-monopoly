@@ -21,6 +21,11 @@ RUN pnpm --filter @mine-monopoly/env build
 COPY packages/types/ ./packages/types/
 COPY apps/server/ ./apps/server/
 
+# apps/server/public is created at runtime (uploads/logs) and is not tracked in git,
+# so it is absent from a clean checkout — which made the runtime-stage COPY of it fail.
+# Ensure it exists here; local-provider.ts mkdirs the subdirs on demand at runtime.
+RUN mkdir -p /app/apps/server/public
+
 # Create standalone deployment with all dependencies properly resolved
 # (including transitive deps of workspace packages like dotenv from @mine-monopoly/env)
 RUN pnpm --filter @mine-monopoly/server deploy --legacy /app/deploy

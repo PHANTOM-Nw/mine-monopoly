@@ -29,6 +29,9 @@ export const __ICE_SERVER_HOST__ = icePrefix
 	? `${protocol}://${domain}`
 	: `${protocol}://${domain}`;
 export const __ICE_USE_PREFIX__ = !!icePrefix;
+// prefix 模式下 peerjs 的 secure 必须跟随部署协议：写死 true 会让 http 部署
+// 去连 wss://host:443，信令直接连不上。
+export const __ICE_SECURE__ = protocol === "https";
 
 // Admin 服务地址
 export const __MONOPOLY_ADMIN__ = adminPrefix

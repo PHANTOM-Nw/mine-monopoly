@@ -9,6 +9,9 @@ const AllowPath = {
 	Admin: [],
 	User: ["/user/info"],
 	Ignore: [
+		// 健康检查必须免鉴权：容器编排（docker healthcheck / compose depends_on）
+		// 和反代探活都拿不到 token，被拦成 401 会导致容器永远不健康。
+		"/health",
 		"/upload/avatar",
 		"/user/public-key",
 		"/user/encryption-key",

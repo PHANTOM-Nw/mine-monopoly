@@ -1,5 +1,5 @@
 import { useLoading, useUtil } from "@src/store";
-import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __FATPAPER_HOST__ } from "@src/../global.config";
+import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __ICE_SECURE__, __FATPAPER_HOST__ } from "@src/../global.config";
 import Peer, { DataConnection } from "peerjs";
 import { connectionDiagnostics } from "@src/utils/connection-diagnostics";
 
@@ -90,7 +90,7 @@ export class PeerClient {
 				? {
 						host: __FATPAPER_HOST__,
 						path: __ICE_SERVER_PATH__,
-						secure: true,
+						secure: __ICE_SECURE__,
 						debug: 0,
 						config: rtcConfig,
 					}
