@@ -1,0 +1,105 @@
+# MineMonopoly 远程服务器部署编排（镜像模式）
+#
+# 与 docker/docker-compose.yml 的区别：
+#   - 这里不做 build，直接拉取 GitHub Actions 推到 GHCR 的镜像（服务器无需源码与构建工具链）
+#   - 自带 MySQL 8.0，无需外部 monopoly-network
+#   - 三个服务端口默认只绑定 127.0.0.1，由宿主机 nginx 反向代理（不额外开放安全组端口）
+#
+# 由 .github/workflows/deploy-server.yml 同步到 ${DEPLOY_PATH} 后执行，
+# 同目录下的 .env 由 workflow 从 repo variables / secrets 生成，
+# compose 既用它做变量插值，也用它作为 server 容器的 env_file。
+name: monopoly
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    container_name: monopoly-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      TZ: ${TZ:-Asia/Shanghai}
+      # 供 mysql/init/01-init.sh 首次初始化时建库建账号使用
+      MONOPOLY_DATABASE: ${MYSQL_DATABASE:-monopoly}
+      MONOPOLY_DB_USER: ${MYSQL_USERNAME:-root}
+      MONOPOLY_DB_PASSWORD: ${MYSQL_PASSWORD:-}
+    command:
+      - --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-96M}
+      - --performance-schema=OFF
+      - --max-connections=${MYSQL_MAX_CONNECTIONS:-60}
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/conf.d:/etc/mysql/conf.d:ro
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    # 不对外映射 3306：只有同一 compose 网络内的 server 需要访问
+    expose:
+      - "3306"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 90s
+    mem_limit: ${MYSQL_MEMORY_LIMIT:-512m}
+
+  server:
+    image: ${SERVER_IMAGE:?SERVER_IMAGE is required}
+    container_name: monopoly-server
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    env_file:
+      - ./.env
+    ports:
+      # BIND_ADDRESS 默认 127.0.0.1：只允许宿主机 nginx 访问，不需要动云安全组
+      - "${BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:?SERVER_PORT is required}:${SERVER_PORT}"
+      - "${BIND_ADDRESS:-127.0.0.1}:${ICE_SERVER_PORT:?ICE_SERVER_PORT is required}:${ICE_SERVER_PORT}"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MONOPOLY_ADMIN_PORT:?MONOPOLY_ADMIN_PORT is required}:${MONOPOLY_ADMIN_PORT}"
+    # 让容器能用 host.docker.internal 访问宿主机上的 coturn（COTURN_METRICS_URL 用得到）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 用户上传物（头像、地图、日志）持久化。
+      # 路径是 /app/public —— Dockerfile 运行阶段把 public 拷到 WORKDIR 根下，
+      # 且 app.ts 用 express.static("public")（cwd=/app）。
+      - server-public:/app/public
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:'+process.env.SERVER_PORT+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+    mem_limit: ${SERVER_MEMORY_LIMIT:-512m}
+
+  # 可选：本项目自带的 coturn（use-auth-secret / HMAC 动态凭证）。
+  # 默认不启动 —— 目标机若已有宿主机 coturn 占用 3478/5349 会端口冲突。
+  # 需要时在 workflow 输入里勾选 deploy_coturn，或手动：
+  #   docker compose --profile coturn up -d
+  coturn:
+    profiles: ["coturn"]
+    image: coturn/coturn:debian
+    container_name: monopoly-coturn
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ${COTURN_CERTS_PATH:-./coturn/certs}:/etc/coturn/certs:ro
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--external-ip=${EXTERNAL_IP:-}"
+      - "--static-auth-secret=${TURN_SECRET:-}"
+      - "--prometheus"
+      - "--prometheus-port=9641"
+      - "--log-file=stdout"
+
+volumes:
+  mysql-data:
+  server-public:

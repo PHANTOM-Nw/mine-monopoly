@@ -1,0 +1,32 @@
+# MineMonopoly 部署用 MySQL 追加配置（挂载到 /etc/mysql/conf.d/）
+#
+# 目标机是 2 vCPU / 1.8G 内存且无 swap，默认 MySQL 8.0 配置会把内存吃到告警线，
+# 这里按小内存场景收紧。需要更大规格时改 repo variable，不用改这个文件：
+#   MYSQL_INNODB_BUFFER_POOL_SIZE / MYSQL_MAX_CONNECTIONS / MYSQL_MEMORY_LIMIT
+#
+# 注意：不要写 default_authentication_plugin —— 8.0.34+ 已弃用、8.4 直接移除会启动失败。
+# TypeORM 用的 mysql2 驱动原生支持 caching_sha2_password，无需回退到 mysql_native_password。
+
+[mysqld]
+skip-name-resolve
+host-cache-size=0
+
+# 单连接缓冲：默认值在小内存机上乘以连接数后很可观
+sort_buffer_size=512K
+join_buffer_size=512K
+read_buffer_size=256K
+read_rnd_buffer_size=512K
+tmp_table_size=16M
+max_heap_table_size=16M
+
+# InnoDB
+innodb_log_buffer_size=8M
+innodb_flush_method=O_DIRECT
+innodb_flush_log_at_trx_commit=2
+
+# 关掉用不到的观测表，省几十 MB
+performance_schema=OFF
+innodb_stats_on_metadata=OFF
+
+# TypeORM synchronize=true 会跑较多 DDL，放宽等待
+lock_wait_timeout=120

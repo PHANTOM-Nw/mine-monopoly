@@ -1,0 +1,42 @@
+# MineMonopoly 自带 coturn 配置模板（仅在 workflow 勾选 deploy_coturn 时使用）。
+#
+# 重要：本项目的 apps/server/src/utils/turn-credentials.ts 用 HMAC-SHA1 动态凭证，
+# 因此必须是 use-auth-secret + static-auth-secret 模式。这与 lt-cred-mech（静态账号）
+# 互斥 —— 如果目标机上已经跑着一个用 lt-cred-mech 的宿主机 coturn，不要试图复用它，
+# 也不要改它的配置（会打断依赖它的其他服务），只能换端口另起一份。
+#
+# 占位符由 workflow 用 sed 替换：
+#   __TURN_REALM__   realm，一般填域名或公网 IP
+#   __LISTEN_PORT__  STUN/TURN 明文端口（对应 STUN_PORT）
+#   __TLS_PORT__     TURN over TLS 端口（对应 TURN_PORT）
+#   __EXTERNAL_IP__  公网 IP（云主机 NAT 环境必填）
+#   __RELAY_MIN__ / __RELAY_MAX__  中继端口范围
+
+listening-port=__LISTEN_PORT__
+tls-listening-port=__TLS_PORT__
+listening-ip=0.0.0.0
+external-ip=__EXTERNAL_IP__
+
+relay-ports=__RELAY_MIN__-__RELAY_MAX__
+
+# TLS 证书（turns: 协议必需，浏览器要求有效证书）
+# 证书目录由 COTURN_CERTS_PATH 挂载到 /etc/coturn/certs，需含 fullchain.pem / privkey.pem。
+# 没有证书时 turns: 起不来，但明文 turn:/stun: 仍可用。
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+
+# HMAC-SHA1 动态凭证验证（secret 由 compose 的 --static-auth-secret 传入，与 TURN_SECRET 一致）
+use-auth-secret
+
+realm=__TURN_REALM__
+
+log-file=stdout
+verbose
+
+fingerprint
+no-multicast-peers
+allowed-peer-ip=0.0.0.0-255.255.255.255
+
+# Prometheus 指标导出（server 通过 COTURN_METRICS_URL 采集，供 admin 面板展示）
+prometheus
+prometheus-port=9641

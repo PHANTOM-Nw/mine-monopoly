@@ -1,0 +1,118 @@
+# MineMonopoly nginx location 片段 —— 由 .github/workflows/deploy-server.yml 生成并同步。
+#
+# 这个文件只含 location / server 级指令，没有 server{}，因为它是被 include 进已有的
+# server{} 块里的（目标机上是 /etc/nginx/inc/site-common.conf，被 chatjudge.conf 的两个
+# server 块 include）。**不要手改服务器上的副本** —— 改仓库里这个模板然后重跑 workflow。
+#
+# 所有 location 都锚定在自己的前缀上，不会影响同一 server 块里已有的
+# /chatjudge、/GameSimulator、/amongai、/interleaf 等站点。
+#
+# 占位符由 workflow 用 sed 替换：
+#   __WEB_BASE_PATH__     客户端 web 访问路径，带首尾斜杠，如 /monopoly/
+#   __WEB_BASE_NOSLASH__  同上但去掉尾斜杠，如 /monopoly
+#   __WEB_ROOT__          静态产物目录，如 /var/www/monopoly
+#   __API_PREFIX__        API 反代前缀，如 /monopoly-server
+#   __ICE_PREFIX__        PeerJS 信令反代前缀，如 /monopoly-ice
+#   __ADMIN_PREFIX__      管理后台反代前缀，如 /monopoly-admin
+#   __UPSTREAM_HOST__     容器监听地址，如 127.0.0.1
+#   __SERVER_PORT__ / __ICE_SERVER_PORT__ / __ADMIN_PORT__
+#   __MAX_BODY_SIZE__     上传体积上限，如 50M
+
+# ---- MineMonopoly 客户端（静态产物） ----
+
+# 带 hash 的构建产物永久缓存。public/ 里那些固定文件名（dice.glb、images/…）
+# 匹配不到这条规则，会落到下面的通用 location 拿短缓存，发版即时生效。
+location ~* "^__WEB_BASE_PATH__(.+-[0-9a-zA-Z_]{8,}\.(?:js|css))$" {
+    alias __WEB_ROOT__/$1;
+    gzip_static on;
+    # 只用 add_header 一次性给全量指令；再叠一个 expires 会发出两个 Cache-Control
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    access_log off;
+}
+
+# index.html 与更新日志绝不能缓存，否则发版后客户端还拿旧的 assets 引用
+location = __WEB_BASE_PATH__index.html {
+    alias __WEB_ROOT__/index.html;
+    add_header Cache-Control "no-store, must-revalidate";
+}
+
+location = __WEB_BASE_PATH__release-notes.json {
+    alias __WEB_ROOT__/release-notes.json;
+    add_header Cache-Control "no-store, must-revalidate";
+}
+
+location = __WEB_BASE_NOSLASH__ {
+    return 301 __WEB_BASE_PATH__;
+}
+
+location __WEB_BASE_PATH__ {
+    alias __WEB_ROOT__/;
+    index index.html;
+    # SPA 回退：未命中的路径交给 index.html（history 路由）
+    try_files $uri $uri/ __WEB_BASE_PATH__index.html;
+    # vite-plugin-compression 已预生成 .gz，直接发预压缩产物
+    gzip_static on;
+    expires 1h;
+}
+
+# ---- MineMonopoly API（含 /static 上传物） ----
+location __API_PREFIX__/ {
+    proxy_pass http://__UPSTREAM_HOST__:__SERVER_PORT__/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    # 地图产物 / 头像上传，覆盖 server 级的 client_max_body_size
+    client_max_body_size __MAX_BODY_SIZE__;
+    # app.ts 里请求级超时是 120s，这里留一点余量
+    proxy_read_timeout 130s;
+    proxy_send_timeout 130s;
+}
+
+location = __API_PREFIX__ {
+    return 301 __API_PREFIX__/;
+}
+
+# ---- MineMonopoly PeerJS 信令（WebSocket） ----
+# 客户端 global.config.ts 把 ICE_BASE_PREFIX 当作 peerjs 的 path，实际请求
+# {prefix}/peerjs...；而 peer@1 的 PeerServer 默认 path 是 "/"，
+# 所以用带尾斜杠的 proxy_pass 把前缀剥掉。
+location __ICE_PREFIX__/ {
+    proxy_pass http://__UPSTREAM_HOST__:__ICE_SERVER_PORT__/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    # 信令是长连接，默认 60s 会被掐断
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_buffering off;
+}
+
+location = __ICE_PREFIX__ {
+    return 301 __ICE_PREFIX__/;
+}
+
+# ---- MineMonopoly 管理后台 ----
+# app.ts 会按 ADMIN_BASE_PREFIX 重写 index.html 里的 assets / env.js / logo.ico 路径，
+# 所以这里同样把前缀剥掉直接透传。
+location __ADMIN_PREFIX__/ {
+    proxy_pass http://__UPSTREAM_HOST__:__ADMIN_PORT__/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size __MAX_BODY_SIZE__;
+    proxy_read_timeout 130s;
+}
+
+location = __ADMIN_PREFIX__ {
+    return 301 __ADMIN_PREFIX__/;
+}
