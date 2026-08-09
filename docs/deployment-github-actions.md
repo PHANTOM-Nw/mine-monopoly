@@ -59,7 +59,20 @@ ssh-copy-id -i ~/.ssh/monopoly_deploy.pub root@<你的服务器IP>
 cat ~/.ssh/monopoly_deploy
 
 # 主机指纹 → GitHub Secret DEPLOY_KNOWN_HOSTS（强烈建议配，否则退化成首次连接就信任）
-ssh-keyscan -H <你的服务器IP>
+# ⚠ 必须显式列出类型：部分环境下 ssh-keyscan 的默认类型不含 ed25519，
+#   而现代 OpenSSH 优先协商 ed25519，漏了它可能导致 host key 校验失败。
+#   三种类型全放进去最稳，ssh 会自己挑匹配的那条。
+ssh-keyscan -t ed25519,ecdsa,rsa -H <你的服务器IP>
+```
+
+如果 `ssh-copy-id` 卡在密码提示上（不知道 root 密码 / 只允许密钥登录），
+用一把**已经能登录**的密钥把新公钥追加进去，注意别覆盖已有的 key：
+
+```bash
+ssh -i ~/.ssh/<已有可用密钥> root@<IP> \
+  "PUBKEY='$(cat ~/.ssh/monopoly_deploy.pub)'; \
+   cp -a ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak-\$(date +%s); \
+   grep -qF \"\$PUBKEY\" ~/.ssh/authorized_keys || printf '%s\n' \"\$PUBKEY\" >> ~/.ssh/authorized_keys"
 ```
 
 ## 二、Repository Variables
