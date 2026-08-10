@@ -150,6 +150,7 @@ nginx -T | grep -n "include\|server_name"
 | `NGINX_SNIPPET_PATH` | `/etc/nginx/inc/monopoly.conf` | 生成的片段落盘位置。⚠ **不要放进 `conf.d/` 之类被 `http{}` 自动 glob 的目录** —— 片段里是 `location`，在 `http` 层是非法指令，会让整个 nginx 起不来 |
 | `NGINX_MAX_BODY_SIZE` | `50M` | 地图/头像上传体积上限 |
 | `BIND_ADDRESS` | `127.0.0.1` | 容器端口绑定地址。改成 `0.0.0.0` 才是端口直连模式（需开安全组） |
+| `ICE_SIGNAL_PORT` | `PROTOCOL=https` 时 `443`，否则 `80` | 浏览器连 peerjs 信令用的端口。**只有 nginx 监听在非标准端口时才要填** —— peerjs 不传 port 会默认用它云服务的 443 |
 | `MYSQL_HOST` | `mysql` | 用自带 MySQL 时必须是 compose 服务名 `mysql` |
 | `MYSQL_PORT` | `3306` | |
 | `MYSQL_DATABASE` | `monopoly` | ⚠ `dbConnecter.ts` 把库名硬编码成 `monopoly`，改这个不生效 |

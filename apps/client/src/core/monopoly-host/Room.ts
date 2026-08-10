@@ -41,6 +41,7 @@ import { FPMessage } from "@mine-monopoly/ui";
 import logService, { ErrorCategory, logWorkerError, logErrorWithOptions } from "@src/utils/log";
 import { OperateListener } from "../worker/class/OperateListener";
 import { base64ToArrayBuffer } from "@mine-monopoly/utils";
+import { randomUUID } from "@mine-monopoly/utils/crypto";
 import { SaveManager, SaveRecord, SaveSnapshot } from "@src/core/save";
 import { createAIDecisionProviderFromConfig, createRemoteAIDecisionProvider } from "@src/core/ai/OpenAICompatibleDecisionProvider";
 import { normalizeAIDecisionConfig, normalizeAIDecisionMode, normalizeRemoteLLMConfig } from "@src/core/ai/ai-decision-config";
@@ -825,7 +826,7 @@ export class Room {
 				]);
 			} catch (error) {
 				this.sendToClient(newCoon, SocketMsgType.GameInitAborted, {
-					initSessionId: crypto.randomUUID(),
+					initSessionId: randomUUID(),
 					reason: error instanceof Error ? error.message : "地图资源加载失败",
 				});
 				this.handleUserOffline(userId);
@@ -1153,7 +1154,7 @@ export class Room {
 		this.enteringSafeMode = false;
 
 		// 启动初始化超时定时器
-		this.initSessionId = crypto.randomUUID();
+		this.initSessionId = randomUUID();
 		this.startInitTimeout();
 
 		this.gameProcessWorker = new GameProcessWorker();
@@ -1752,7 +1753,7 @@ export class Room {
 		this.roomBroadcast({
 			type: SocketMsgType.GameInitAborted,
 			source: SocketMsgSource.Server,
-			data: { initSessionId: this.initSessionId || crypto.randomUUID(), reason: failureReason },
+			data: { initSessionId: this.initSessionId || randomUUID(), reason: failureReason },
 		});
 
 		// 重置游戏状态
@@ -2503,7 +2504,7 @@ export class Room {
 				roomOwnerId: this.ownerId,
 				aiConfig: this.aiDecisionConfig,
 				saveData: this.pendingSaveData ?? undefined,
-				initSessionId: this.initSessionId || crypto.randomUUID(),
+				initSessionId: this.initSessionId || randomUUID(),
 			},
 		});
 

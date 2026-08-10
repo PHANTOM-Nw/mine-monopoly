@@ -255,6 +255,9 @@ jobs:
           SERVER_PORT=${{ vars.SERVER_PORT }}
           ICE_SERVER_PORT=${{ vars.ICE_SERVER_PORT }}
           MONOPOLY_ADMIN_PORT=${{ vars.MONOPOLY_ADMIN_PORT }}
+          # peerjs 信令走 nginx 反代时用的端口。留空则由 PROTOCOL 推出 80/443，
+          # 只有 nginx 监听在非标准端口时才需要显式填。
+          ${{ vars.ICE_SIGNAL_PORT && format('ICE_SIGNAL_PORT={0}', vars.ICE_SIGNAL_PORT) || '' }}
           MAP_ENCRYPT_KEY=${MAP_ENCRYPT_KEY}
           TC_BUCKET_NAME=${{ vars.TC_BUCKET_NAME }}
           TC_REGION=${{ vars.TC_REGION }}

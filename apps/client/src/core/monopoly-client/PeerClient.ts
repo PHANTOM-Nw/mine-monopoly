@@ -1,5 +1,5 @@
 import { useLoading, useUtil } from "@src/store";
-import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __ICE_SECURE__, __FATPAPER_HOST__ } from "@src/../global.config";
+import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __ICE_SECURE__, __ICE_SIGNAL_PORT__, __FATPAPER_HOST__ } from "@src/../global.config";
 import Peer, { DataConnection } from "peerjs";
 import { connectionDiagnostics } from "@src/utils/connection-diagnostics";
 
@@ -89,6 +89,8 @@ export class PeerClient {
 			const peerOptions = __ICE_USE_PREFIX__
 				? {
 						host: __FATPAPER_HOST__,
+						// 不传 port 的话 peerjs 会用它云服务的默认值 443
+						port: __ICE_SIGNAL_PORT__,
 						path: __ICE_SERVER_PATH__,
 						secure: __ICE_SECURE__,
 						debug: 0,
@@ -100,7 +102,7 @@ export class PeerClient {
 				mode: __ICE_USE_PREFIX__ ? "prefix" : "port",
 				host: __ICE_USE_PREFIX__ ? __FATPAPER_HOST__ : host,
 				path: __ICE_USE_PREFIX__ ? __ICE_SERVER_PATH__ : undefined,
-				port: __ICE_USE_PREFIX__ ? undefined : port,
+				port: __ICE_USE_PREFIX__ ? __ICE_SIGNAL_PORT__ : port,
 				iceTransportPolicy: rtcConfig.iceTransportPolicy || "all",
 			}));
 

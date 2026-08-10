@@ -1,4 +1,5 @@
 import { MonopolyClient, useMonopolyClient } from "./MonopolyClient";
+import { randomUUID } from "@mine-monopoly/utils/crypto";
 import {
 	GameEventType,
 	GameSetting,
@@ -648,7 +649,7 @@ const handleFormDialog: ServerMessageHandler<SocketMsgType.FormDialog> = (msg, c
 
 	// 将 FormDialogOption 转换为 FormSchema 格式
 	const formSchema: FormSchema[] = data.option.fields.map((field) => ({
-		id: crypto.randomUUID(),
+		id: randomUUID(),
 		key: field.key,
 		type: typeof field.defaultValue === "number" ? "number-input" : "select",
 		label: field.label,

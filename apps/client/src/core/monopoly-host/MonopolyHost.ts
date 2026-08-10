@@ -1,7 +1,7 @@
 import Peer, { DataConnection } from "peerjs";
 import { ClientSocketMessage, SocketMessage, SocketMsgType, UserInRoomInfo } from "@mine-monopoly/types";
 import { deleteRoom, emitRoomHeart } from "@src/utils/api/room-router";
-import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __ICE_SECURE__, __FATPAPER_HOST__ } from "@src/../global.config";
+import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __ICE_SECURE__, __ICE_SIGNAL_PORT__, __FATPAPER_HOST__ } from "@src/../global.config";
 import { handleClientSocketMessage } from "./client-message-handlers";
 import { Room } from "./Room";
 import { connectionDiagnostics } from "@src/utils/connection-diagnostics";
@@ -230,6 +230,8 @@ export class MonopolyHost {
 			const peerOptions = __ICE_USE_PREFIX__
 				? {
 						host: __FATPAPER_HOST__,
+						// 不传 port 的话 peerjs 会用它云服务的默认值 443
+						port: __ICE_SIGNAL_PORT__,
 						path: __ICE_SERVER_PATH__,
 						secure: __ICE_SECURE__,
 						debug: 0,

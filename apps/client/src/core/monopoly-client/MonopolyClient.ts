@@ -1,4 +1,5 @@
 import { FPMessage } from "@mine-monopoly/ui";
+import { randomUUID } from "@mine-monopoly/utils/crypto";
 import { useChat, useGameLog, useLoading, useRoomInfo, useUserInfo, useUtil } from "@src/store";
 import { useGameData } from "@src/store/game";
 import { emitHostPeerId, joinRoomApi } from "@src/utils/api/room-router";
@@ -197,10 +198,10 @@ export class MonopolyClient {
 	public requestSave(): void { this.session.requestSave(); }
 	public async loadSave(record: any, usePrevious: boolean = false): Promise<{ success: boolean; error?: string }> { return this.session.loadSave(record, usePrevious); }
 	public gameInitFinished() {
-		return this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.GameInitFinished, data: undefined }, extra: { initSessionId: this.currentInitSessionId, initStatus: "ready", messageId: crypto.randomUUID() } });
+		return this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.GameInitFinished, data: undefined }, extra: { initSessionId: this.currentInitSessionId, initStatus: "ready", messageId: randomUUID() } });
 	}
 	public gameInitFailed(reason: string) {
-		return this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.GameInitFinished, data: undefined }, extra: { initSessionId: this.currentInitSessionId, initStatus: "failed", reason, messageId: crypto.randomUUID() } });
+		return this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.GameInitFinished, data: undefined }, extra: { initSessionId: this.currentInitSessionId, initStatus: "failed", reason, messageId: randomUUID() } });
 	}
 
 	public rollDice() {

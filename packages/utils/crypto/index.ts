@@ -1,6 +1,41 @@
 const MAGIC = new Uint8Array([0x4d, 0x4d, 0x4d, 0x50]); // "MMMP"
 const IV_LENGTH = 16;
 
+/**
+ * crypto.randomUUID 的安全替代。
+ *
+ * ⚠ crypto.randomUUID 只在 secure context 里存在（https、localhost、127.0.0.1）。
+ * 用 http + 裸 IP 访问部署好的站点时它是 undefined，直接调会抛 TypeError。
+ *
+ * 这个坑特别难查：如果它发生在 pinia store 的 state() 里，pinia 会**先**把半成品
+ * store 塞进 _s（源码里那句 "store the partial store now so the setup of stores can
+ * instantiate each other"），然后才跑 setup()。setup() 抛异常后半成品留在缓存里，
+ * 之后每次 useXxx() 都拿到一个没有 actions 的残缺 store，报错变成
+ * "xxx(...).someAction is not a function"，跟真正的原因八竿子打不着。
+ *
+ * crypto.getRandomValues 没有 secure context 限制，用它兜底。
+ */
+export function randomUUID(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+  return (
+    hex.slice(0, 4).join("") +
+    "-" +
+    hex.slice(4, 6).join("") +
+    "-" +
+    hex.slice(6, 8).join("") +
+    "-" +
+    hex.slice(8, 10).join("") +
+    "-" +
+    hex.slice(10, 16).join("")
+  );
+}
+
 function getKeyBytes(key: string): Uint8Array {
   if (!key) throw new Error("加密密钥未配置，请检查 MAP_ENCRYPT_KEY 环境变量");
   const bytes = new TextEncoder().encode(key);
