@@ -58,6 +58,13 @@
 		if (gameRenderer) islockingCamera.value = gameRenderer.toggleLockCamera();
 	}
 
+	const isOverview = ref(false);
+	const overviewIcon = computed(() => (isOverview.value ? "fa-compress" : "fa-expand"));
+
+	function handleToggleOverview() {
+		if (gameRenderer) isOverview.value = gameRenderer.toggleOverview();
+	}
+
 	function handleRollDice() {
 		if (socketClient) {
 			socketClient.rollDice();
@@ -250,6 +257,13 @@
 					<button class="border-button lock-camera" @click="handleToggleLockCamera">
 						<FontAwesomeIcon :icon="lockCameraIcon" />
 					</button>
+					<button
+						class="border-button lock-camera"
+						:title="isOverview ? '回到跟随视角' : '全局俯视'"
+						@click="handleToggleOverview"
+					>
+						<FontAwesomeIcon :icon="overviewIcon" />
+					</button>
 				</div>
 
 				<ChanceCardContainer />
@@ -319,12 +333,15 @@
 	.ui-item {
 		position: absolute;
 
+		// 原本是 display:none，锁定视角按钮从来没显示过。
+		// 放左上角：右上是玩家卡片(top:4.2rem)、上中是回合信息、下方是卡牌和按钮面板，只有这里是空的。
 		&.tool-bar {
 			position: absolute;
-			right: 0;
-			top: 0;
-			display: none;
-			justify-content: space-between;
+			left: 0.8rem;
+			top: 0.8rem;
+			display: flex;
+			flex-direction: column;
+			gap: 0.5rem;
 			pointer-events: none;
 		}
 	}
