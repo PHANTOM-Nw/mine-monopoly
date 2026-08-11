@@ -29,6 +29,10 @@ const AllowPath = {
 		"/room-router/emit-host",
 		"/room-router/delete",
 		"/room-router/heart",
+		// 断线重连时 assertRoomStillActive 靠它判断房间还在不在。漏了这条的话，
+		// 游客（无 token）重连会拿到 401，被拦截器当成登录过期直接踢回登录页 ——
+		// 明明只是网络抖了一下。
+		"/room-router/status",
 		"/room-router/random-public-room",
 		"/room-router/set-private",
 		"/room-router/set-started",
