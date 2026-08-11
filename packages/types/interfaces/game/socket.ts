@@ -923,6 +923,9 @@ export interface RoomInfo {
 	/** 房主名称 */
 	ownerName: string;
 
+	/** 房间人数上限（由房主设置，含 AI 玩家，不含旁观者） */
+	maxPlayers: number;
+
 	/** 游戏设置 */
 	gameSetting: GameSetting;
 }

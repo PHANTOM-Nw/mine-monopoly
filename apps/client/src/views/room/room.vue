@@ -19,7 +19,13 @@
 	import { useResourceStore, useMapData } from "@src/store/game";
 	import { SaveManager, SaveRecord } from "@src/core/save";
 	import FpPopover from "@src/components/utils/fp-popover/fp-popover.vue";
-	import { arrayBufferToBase64 } from "@mine-monopoly/utils";
+	import {
+		arrayBufferToBase64,
+		clampRoomPlayerLimit,
+		getRoomSeatColumns,
+		MAX_ROOM_PLAYERS_LIMIT,
+		MIN_ROOM_PLAYERS,
+	} from "@mine-monopoly/utils";
 	import CustomForm from "@src/components/utils/custom-form/index.vue";
 	import FpErrorBoundary from "@src/components/utils/fp-error-boundary/index.vue";
 import { vStagger } from "@src/directives";
@@ -32,7 +38,8 @@ import { vStagger } from "@src/directives";
 
 	const roomInfoStore = useRoomInfo();
 	const userInfoStore = useUserInfo();
-	const maxRoomPlayers = 6;
+	const maxRoomPlayers = computed(() => clampRoomPlayerLimit(roomInfoStore.maxPlayers));
+	const seatColumns = computed(() => getRoomSeatColumns(maxRoomPlayers.value));
 
 	const playerList = computed(() => roomInfoStore.userList.filter((user) => !user.isSpectator));
 	const spectatorList = computed(() => roomInfoStore.userList.filter((user) => user.isSpectator));
@@ -42,7 +49,7 @@ import { vStagger } from "@src/directives";
 			| { type: "add-ai" }
 			| { type: "empty"; key: string }
 		> = playerList.value.map((user) => ({ type: "player", user }));
-		const emptyCount = Math.max(0, maxRoomPlayers - slots.length);
+		const emptyCount = Math.max(0, maxRoomPlayers.value - slots.length);
 		for (let i = 0; i < emptyCount; i++) {
 			const isFirstEmpty = i === 0;
 			if (isFirstEmpty && canAddAIPlayer.value) {
@@ -158,7 +165,20 @@ import { vStagger } from "@src/directives";
 				!useLoading().loading
 			),
 	);
-	const canAddAIPlayer = computed(() => isOwner.value && playerList.value.length < maxRoomPlayers && !roomInfoStore.isStarted);
+	const canAddAIPlayer = computed(() => isOwner.value && playerList.value.length < maxRoomPlayers.value && !roomInfoStore.isStarted);
+
+	const canDecreaseMaxPlayers = computed(() => isOwner.value && !roomInfoStore.isStarted && maxRoomPlayers.value > MIN_ROOM_PLAYERS);
+	const canIncreaseMaxPlayers = computed(
+		() => isOwner.value && !roomInfoStore.isStarted && maxRoomPlayers.value < MAX_ROOM_PLAYERS_LIMIT,
+	);
+
+	function handleChangeMaxPlayers(delta: number) {
+		if (!socketClient) return;
+		const result = socketClient.setMaxPlayers(maxRoomPlayers.value + delta);
+		if (!result.success) {
+			FPMessage({ type: "error", message: result.error || "修改人数上限失败" });
+		}
+	}
 
 	async function handleSetPrivate() {
 		isPrivate.value = !isPrivate.value;
@@ -400,6 +420,29 @@ import { vStagger } from "@src/directives";
 			</div>
 
 			<div class="right-container">
+				<div class="room-capacity">
+					<span class="room-capacity-label">人数上限</span>
+					<button
+						v-if="isOwner"
+						type="button"
+						class="room-capacity-button btn-small"
+						:disabled="!canDecreaseMaxPlayers"
+						@click="handleChangeMaxPlayers(-1)"
+					>
+						－
+					</button>
+					<span class="room-capacity-value">{{ playerList.length }} / {{ maxRoomPlayers }}</span>
+					<button
+						v-if="isOwner"
+						type="button"
+						class="room-capacity-button btn-small"
+						:disabled="!canIncreaseMaxPlayers"
+						@click="handleChangeMaxPlayers(1)"
+					>
+						＋
+					</button>
+					<span v-if="isOwner && maxRoomPlayers > 8" class="room-capacity-tip">人数越多越吃房主上行带宽</span>
+				</div>
 				<div v-if="spectatorList.length > 0" class="spectator-list">
 					<span class="spectator-list-label">旁观者</span>
 					<span v-for="user in spectatorList" :key="user.userId" class="spectator-user">
@@ -409,7 +452,7 @@ import { vStagger } from "@src/directives";
 						退出旁观
 					</button>
 				</div>
-				<div class="player-list-container" v-stagger="350">
+				<div class="player-list-container" :style="{ '--seat-columns': seatColumns }" v-stagger="350">
 					<template v-for="slot in roomSlots" :key="slot.type === 'player' ? slot.user.userId : slot.type === 'empty' ? slot.key : 'add-ai'">
 						<room-user-card
 							v-if="slot.type === 'player'"
@@ -552,6 +595,55 @@ import { vStagger } from "@src/directives";
 		display: flex;
 		flex-direction: column;
 
+		& > .room-capacity {
+			display: flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 0.45rem;
+			margin-bottom: 0.6rem;
+			padding: 0.5rem 0.9rem;
+			border-radius: 0.7rem;
+			box-shadow: var(--fp-shadow-md);
+			@include felt-patch(#cfe4ff);
+
+			& .room-capacity-label {
+				display: inline-flex;
+				align-items: center;
+				padding: 0.36rem 0.7rem;
+				border-radius: 0.65rem;
+				background-image: var(--fp-texture-felt);
+				background-color: var(--fp-color-secondary);
+				color: #ffffff;
+				font-size: 0.88rem;
+				letter-spacing: 0.04em;
+			}
+
+			& .room-capacity-value {
+				min-width: 3.2rem;
+				text-align: center;
+				color: var(--fp-color-text);
+				font-size: 0.95rem;
+				font-weight: 700;
+			}
+
+			& .room-capacity-button {
+				min-width: 2rem;
+				flex-shrink: 0;
+
+				&:disabled {
+					opacity: 0.45;
+					cursor: not-allowed;
+				}
+			}
+
+			& .room-capacity-tip {
+				margin-left: auto;
+				color: var(--fp-color-text);
+				font-size: 0.72rem;
+				opacity: 0.75;
+			}
+		}
+
 		& > .spectator-list {
 			display: flex;
 			align-items: center;
@@ -599,10 +691,13 @@ import { vStagger } from "@src/directives";
 		& > .player-list-container {
 			flex: 1;
 			display: grid;
-			grid-template-rows: 1fr 1fr;
-			grid-template-columns: 1fr 1fr 1fr;
+			// 列数由房间人数上限决定，行数交给 grid 自动铺开；
+			// 行高留出下限，人数多到放不下时容器滚动而不是把卡片压扁
+			grid-template-columns: repeat(var(--seat-columns, 3), 1fr);
+			grid-auto-rows: minmax(8rem, 1fr);
 			row-gap: 0.5rem;
 			column-gap: 0.5rem;
+			overflow-y: auto;
 		}
 	}
 }

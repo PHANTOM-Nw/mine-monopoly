@@ -40,7 +40,7 @@ import { useMapData } from "@src/store/game";
 import { FPMessage } from "@mine-monopoly/ui";
 import logService, { ErrorCategory, logWorkerError, logErrorWithOptions } from "@src/utils/log";
 import { OperateListener } from "../worker/class/OperateListener";
-import { base64ToArrayBuffer } from "@mine-monopoly/utils";
+import { base64ToArrayBuffer, clampRoomPlayerLimit, DEFAULT_ROOM_PLAYERS } from "@mine-monopoly/utils";
 import { randomUUID } from "@mine-monopoly/utils/crypto";
 import { SaveManager, SaveRecord, SaveSnapshot } from "@src/core/save";
 import { createAIDecisionProviderFromConfig, createRemoteAIDecisionProvider } from "@src/core/ai/OpenAICompatibleDecisionProvider";
@@ -78,6 +78,8 @@ export class Room {
 	private aiUserList: Map<string, UserInRoomInfo>;
 	private ownerId: string = "";
 	private ownerSpectatorMode: boolean;
+	/** 房间人数上限，由房主设置，含 AI 玩家、不含旁观者 */
+	private maxPlayers: number;
 	private gameSetting: GameSetting;
 	private aiDecisionConfig: AIDecisionConfig;
 	private aiPlayerBindings: Map<string, AIPlayerDecisionBinding>;
@@ -119,7 +121,6 @@ export class Room {
 	private static readonly HEARTBEAT_NORMAL_TIMEOUT = 15000;
 	private static readonly HEARTBEAT_BUSY_TIMEOUT = 60000;
 	private static readonly INIT_TIMEOUT = 65000;
-	private static readonly MAX_ROOM_PLAYERS = 6;
 	private static readonly AI_COLOR_PALETTE = [
 		"#4f83ff",
 		"#00a6a6",
@@ -147,6 +148,7 @@ export class Room {
 		this.roomId = roomId;
 		this.ownerId = "";
 		this.ownerSpectatorMode = false;
+		this.maxPlayers = DEFAULT_ROOM_PLAYERS;
 		this.isStarted = false;
 		this.userList = new Map();
 		this.aiUserList = new Map();
@@ -185,8 +187,8 @@ export class Room {
 		if (this.isStarted) {
 			return { success: false, error: "游戏开始后不能添加 AI 玩家" };
 		}
-		if (this.getSeatUsers().length >= Room.MAX_ROOM_PLAYERS) {
-			return { success: false, error: `房间最多支持 ${Room.MAX_ROOM_PLAYERS} 名玩家` };
+		if (this.isSeatFull()) {
+			return { success: false, error: `房间最多支持 ${this.maxPlayers} 名玩家` };
 		}
 
 		const aiIndex = this.aiUserList.size + 1;
@@ -251,6 +253,54 @@ export class Room {
 
 	private getSeatUsers(): UserInRoomInfo[] {
 		return this.getAllRoomUsers().filter((user) => !user.isSpectator);
+	}
+
+	/** 当前占用的座位数（真人 + AI，旁观者不占座） */
+	public getSeatCount(): number {
+		return this.getSeatUsers().length;
+	}
+
+	public getMaxPlayers(): number {
+		return this.maxPlayers;
+	}
+
+	/** 座位是否已满，真人入房与添加 AI 共用同一口径 */
+	public isSeatFull(): boolean {
+		return this.getSeatCount() >= this.maxPlayers;
+	}
+
+	/**
+	 * 修改房间人数上限。调低时会先尝试移除末位 AI 腾出空间，仍不够则拒绝。
+	 *
+	 * @param value 目标上限，会被收敛到 [MIN_ROOM_PLAYERS, MAX_ROOM_PLAYERS_LIMIT]
+	 */
+	public setMaxPlayers(value: number): { success: boolean; error?: string } {
+		if (this.isStarted) {
+			return { success: false, error: "游戏开始后不能修改人数上限" };
+		}
+		const target = clampRoomPlayerLimit(value);
+		if (target === this.maxPlayers) return { success: true };
+
+		// 真人不会被自动踢出：先确认光靠移除 AI 能否腾出空间，避免中途失败留下半吊子状态
+		const humanSeatCount = this.getSeatCount() - this.aiUserList.size;
+		if (target < humanSeatCount) {
+			return { success: false, error: `房间内已有 ${humanSeatCount} 名真人玩家，请先移出玩家` };
+		}
+		while (target < this.getSeatCount()) {
+			if (!this.removeLastAiPlayerForSeatCapacity()) {
+				return { success: false, error: "无法腾出足够座位" };
+			}
+		}
+
+		this.maxPlayers = target;
+		this.roomBroadcast({
+			type: SocketMsgType.MsgNotify,
+			source: SocketMsgSource.Server,
+			data: undefined,
+			msg: { type: "info", content: `房间人数上限已调整为 ${target} 人` },
+		});
+		this.roomInfoBroadcast();
+		return { success: true };
 	}
 
 	private getGameParticipants(): UserInRoomInfo[] {
@@ -324,7 +374,7 @@ export class Room {
 		}
 
 		if (!enabled) {
-			while (this.getSeatUsers().length >= Room.MAX_ROOM_PLAYERS) {
+			while (this.isSeatFull()) {
 				if (!this.removeLastAiPlayerForSeatCapacity()) {
 					return { success: false, error: "房间已满，无法退出旁观模式" };
 				}
@@ -644,6 +694,7 @@ export class Room {
 			isStarted: this.isStarted,
 			ownerId: this.getOwner().userId,
 			ownerName: this.getOwner().username,
+			maxPlayers: this.maxPlayers,
 			gameSetting: this.gameSetting,
 		};
 		return roomInfo;
@@ -1515,6 +1566,8 @@ export class Room {
 		const { valid, aiPlayerIds, error } = this.saveManager.validatePlayers(record, roomUserIds);
 		if (!valid) return { success: false, error };
 		this.ensureAiPlayersForSave(record, aiPlayerIds);
+		// 存档补齐 AI 后座位数可能超过当前上限，抬高上限以免房间显示成超编状态
+		this.maxPlayers = clampRoomPlayerLimit(Math.max(this.maxPlayers, this.getSeatCount()));
 		this.roomInfoBroadcast();
 
 		// 预存存档数据，将在 handleWorkerReady 发送 LoadGameInfo 时一并传递给 Worker

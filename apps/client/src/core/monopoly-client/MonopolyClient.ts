@@ -168,6 +168,8 @@ export class MonopolyClient {
 
 	public setSpectatorMode(enabled: boolean): { success: boolean; error?: string } { return this.session.setSpectatorMode(enabled); }
 
+	public setMaxPlayers(value: number): { success: boolean; error?: string } { return this.session.setMaxPlayers(value); }
+
 	public changeRoleForUser(userId: string, roleId: string): { success: boolean; error?: string } {
 		if (this.session.isAiPlayer(userId)) return this.session.changeRoleForUser(userId, roleId);
 		if (userId === useUserInfo().userId) { this.changeRole(roleId); return { success: true }; }

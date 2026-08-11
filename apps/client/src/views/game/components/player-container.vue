@@ -51,6 +51,21 @@ function handleShowPlayerDetail(player: PlayerInfo) {
 	right: 0;
 	margin-right: 0.8rem;
 	z-index: var(--z-ui);
+	// 人数上限可调到 12，卡片列表要能滚动，否则会溢出到屏幕外
+	max-height: calc(100% - 5.4rem);
+	overflow-y: auto;
+	overflow-x: hidden;
+	gap: 0.3rem;
+	scrollbar-width: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+	}
+
+	// 溢出滚动时不允许卡片被压扁
+	& > * {
+		flex-shrink: 0;
+	}
 
 	& > .tips {
 		width: 100%;
