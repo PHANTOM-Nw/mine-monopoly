@@ -88,8 +88,11 @@ export class MonopolyClient {
 		try {
 			const response = await joinRoomApi(roomId);
 			const data = response.data;
+			// 202：房间在，但房主还没把 peerId 报上来，此时响应体里没有 data
+			if (!data) throw new Error("房主尚未就绪，请稍后重试");
 			this.session.setIceServers(data.iceServers || []);
 			let hostPeerId = data.hostPeerId;
+			let hostEpoch = data.hostEpoch;
 			if (data.needCreate) {
 				useLoading().showLoading("正在创建主机...");
 				hostPeerId = await this.session.createHost(roomId, data.deleteIntervalMs, {
@@ -97,11 +100,13 @@ export class MonopolyClient {
 					hostEpoch: data.hostEpoch,
 				});
 				const user = useUserInfo();
-				await emitHostPeerId(roomId, hostPeerId, user.username, user.userId, data.hostLeaseToken);
+				// emit-host 会把 epoch 推进一格，重连时要拿这个新值去比对
+				const emitRes = await emitHostPeerId(roomId, hostPeerId, user.username, user.userId, data.hostLeaseToken);
+				hostEpoch = emitRes.data.hostEpoch;
 			}
 			if (!hostPeerId) throw new Error("房主尚未就绪，请稍后重试");
 			useLoading().showLoading("正在建立连接...");
-			await this.session.connect(roomId, hostPeerId, () => useRoomInfo().isReady);
+			await this.session.connect(roomId, hostPeerId, hostEpoch, () => useRoomInfo().isReady);
 			connectionDiagnostics.stageEnd("joinRoom_Total");
 		} catch (error: any) {
 			connectionDiagnostics.stageFail("joinRoom_Total", error?.message || "服务器连接失败");

@@ -29,18 +29,22 @@ export class MonopolyHost {
 	private destoryHandler: Function | undefined;
 	private hostLeaseToken: string;
 
-	private constructor(peer: Peer, room: Room, heartContinuationTimeMs: number, hostLeaseToken: string) {
+	private constructor(peer: Peer, room: Room, heartbeatIntervalMs: number, hostLeaseToken: string) {
 		this.peer = peer;
 		this.room = room;
 		this.hostLeaseToken = hostLeaseToken;
 
 		this.init(this.peer);
 
-		const heartInterval = setInterval(() => {
+		const sendHeart = () => {
 			void emitRoomHeart(this.room.getRoomId(), this.hostLeaseToken).catch((error) => {
 				console.warn("[MonopolyHost] 房主租约心跳失败", error);
 			});
-		}, heartContinuationTimeMs);
+		};
+		// 立刻续一次租：/join 到这里之间隔着 PeerJS 建连（几百毫秒到几秒），
+		// 等满一个 interval 再发第一次心跳的话，租约很可能已经先到期了。
+		sendHeart();
+		const heartInterval = setInterval(sendHeart, heartbeatIntervalMs);
 		this.intervalList.push(heartInterval);
 
 		window.addEventListener("beforeunload", this.destory);
@@ -225,7 +229,7 @@ export class MonopolyHost {
 		});
 	}
 
-	public static async create(roomId: string, host: string, port: number, heartContinuationTimeMs: number, iceServers: RTCIceServer[], registration: { hostLeaseToken: string; hostEpoch: number }) {
+	public static async create(roomId: string, host: string, port: number, heartbeatIntervalMs: number, iceServers: RTCIceServer[], registration: { hostLeaseToken: string; hostEpoch: number }) {
 		const peer = await new Promise<Peer>((resolve) => {
 			const peerOptions = __ICE_USE_PREFIX__
 				? {
@@ -258,7 +262,7 @@ export class MonopolyHost {
 		});
 		const room = new Room(roomId);
 
-		return new MonopolyHost(peer, room, heartContinuationTimeMs, registration.hostLeaseToken);
+		return new MonopolyHost(peer, room, heartbeatIntervalMs, registration.hostLeaseToken);
 	}
 
 	public broadcast(msg: string) {

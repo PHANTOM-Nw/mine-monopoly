@@ -19,8 +19,8 @@ export async function emitHostPeerId(
 	hostName: string,
 	hostId: string,
 	hostLeaseToken: string,
-): Promise<void> {
-	await apiClient.post("/room-router/emit-host", {
+) {
+	return apiClient.post<{ hostEpoch: number }>("/room-router/emit-host", {
 		roomId,
 		hostPeerId,
 		hostName,

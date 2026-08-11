@@ -39,7 +39,7 @@ export interface WebRtcSessionManagerOptions {
 	onReconnectCancelled?: () => void;
 }
 
-type ReconnectContext = { roomId: string; hostPeerId: string; isReady: () => boolean };
+type ReconnectContext = { roomId: string; hostPeerId: string; hostEpoch: number; isReady: () => boolean };
 export type WebRtcSessionEvent = "state" | "message" | "heartbeat" | "reconnect-attempt" | "host-closed";
 class HostRoomClosedError extends Error {
 	public constructor(public readonly status: "closed" | "expired") {
@@ -107,10 +107,10 @@ export class WebRtcSessionManager {
 		return this.host.getPeerId();
 	}
 
-	public async connect(roomId: string, hostPeerId: string, isReady: () => boolean): Promise<void> {
+	public async connect(roomId: string, hostPeerId: string, hostEpoch: number, isReady: () => boolean): Promise<void> {
 		this.stopReconnection();
 		this.explicitClose = false;
-		this.reconnectContext = { roomId, hostPeerId, isReady };
+		this.reconnectContext = { roomId, hostPeerId, hostEpoch, isReady };
 		this.transition("connecting");
 		await this.openConnection(hostPeerId);
 		const result = this.sendJoinRoom(isReady());
@@ -220,7 +220,7 @@ export class WebRtcSessionManager {
 	private async reconnectNow(): Promise<void> {
 		const context = this.reconnectContext;
 		if (!context) throw new Error("缺少重连上下文");
-		await this.assertRoomStillActive(context.roomId);
+		await this.assertRoomStillActive(context.roomId, context.hostEpoch);
 		await this.openConnection(context.hostPeerId);
 		const result = this.sendJoinRoom(context.isReady());
 		if (!result.ok) throw new Error("重连加入消息发送失败");
@@ -341,11 +341,14 @@ export class WebRtcSessionManager {
 		this.reconnectManager?.destroy();
 		this.reconnectManager = null;
 	}
-	private async assertRoomStillActive(roomId: string): Promise<void> {
+	private async assertRoomStillActive(roomId: string, hostEpoch: number): Promise<void> {
 		const response = await getRoomSessionStatus(roomId);
 		const status = response.data.status;
 		if (status === "closed" || status === "expired") throw new HostRoomClosedError(status);
 		if (status !== "active") throw new Error("房间会话不可用");
+		// 同一个房间号可能已经被别人重新开了一局：状态是 active，但换了房主。
+		// 不比对 epoch 的话，这里会一直去连早就不存在的旧 peerId，无限重连。
+		if (response.data.hostEpoch !== hostEpoch) throw new HostRoomClosedError("closed");
 	}
 	private sendJoinRoom(isReady: boolean): SessionSendResult {
 		const user = useUserInfo();

@@ -25,9 +25,43 @@ type RoomMapItem = {
 };
 
 export const roomRouter = Router();
-const heartContinuationTimeMs = 10000; // 房主心跳租约时长
+// 房主租约时长：超过这个时间没收到 /heart 就判定房主掉线。
+const hostLeaseTtlMs = 15000;
+// 下发给房主的心跳周期。必须明显小于租约时长 —— 两者相等时，"下一次心跳"和
+// "租约到期"是同一时刻，清理定时器和心跳请求正面撞车，房间会在房主一切正常的
+// 情况下被误判过期。取 1/3 留出两次重试的余量。
+const hostHeartbeatIntervalMs = Math.floor(hostLeaseTtlMs / 3);
 const closedSessionRetentionMs = 5 * 60 * 1000;
 const roomMap = new Map<string, RoomMapItem>();
+
+/**
+ * 把一条 roomMap 记录重置为一局全新的会话。
+ *
+ * 用于新建房间，以及复用已经 closed / expired 的同名房间号。
+ * hostEpoch 只增不减（跨会话单调），老客户端靠它识别"我连的那局已经没了"。
+ */
+function startSession(roomId: string, previous?: RoomMapItem): RoomMapItem {
+	const now = Date.now();
+	const item: RoomMapItem = {
+		roomId,
+		hostName: "",
+		hostId: "",
+		hostPeerId: null,
+		createTime: now,
+		deleteTime: now + hostLeaseTtlMs,
+		lastHeartTime: now,
+		isPrivate: true,
+		isStarted: false,
+		mapId: null,
+		mapName: null,
+		status: "active",
+		statusUpdatedAt: now,
+		hostLeaseToken: randomUUID(),
+		hostEpoch: previous ? previous.hostEpoch + 1 : 0,
+	};
+	roomMap.set(roomId, item);
+	return item;
+}
 
 //删除房间定时器
 setInterval(() => {
@@ -63,47 +97,35 @@ roomRouter.get("/join", async (req, res, next) => {
 	console.log(`[room-router] /join roomId=${roomId} userId=${userId || "guest"} iceServers=${JSON.stringify(iceServers.map(s => s.urls))}`);
 
 	if (roomId && roomId.length < 13) {
-		if (roomMap.has(roomId)) {
-			const room = roomMap.get(roomId);
-			if (room && room.status !== "active") {
-				res.status(410).json({ status: 410, msg: room.status === "closed" ? "房间已关闭" : "房间已过期", data: { status: room.status } });
-				return;
-			}
-			if (room && room.hostPeerId !== null) {
-				const resMsg: ResInterface = {
-					status: 200,
-					data: { hostPeerId: room.hostPeerId, needCreate: false, iceServers, hostEpoch: room.hostEpoch },
-				};
-				res.status(resMsg.status).json(resMsg);
-			} else {
-				const resMsg: ResInterface = {
-					status: 202,
-					msg: "服务器正在与房主建立联系, 请稍后重试...",
-				};
-				res.status(resMsg.status).json(resMsg);
-			}
-		} else {
-			//创建房间s
-			roomMap.set(roomId, {
-				roomId,
-				hostName: "",
-				hostId: "",
-				hostPeerId: null,
-				createTime: Date.now(),
-				deleteTime: Date.now() + heartContinuationTimeMs,
-				lastHeartTime: Date.now(),
-				isPrivate: true,
-				isStarted: false,
-				mapId: null,
-				mapName: null,
-				status: "active",
-				statusUpdatedAt: Date.now(),
-				hostLeaseToken: randomUUID(),
-				hostEpoch: 0,
-			});
+		const existing = roomMap.get(roomId);
+		// 已结束的会话不再挡住同名房间号：房主已经不在了，让来的人直接开新的一局，
+		// 不用干等墓碑过期。新会话的 hostEpoch 在旧值上 +1，上一局残留的客户端
+		// 轮询 /status 时一比对就知道自己那局已经结束，不会误连到新房主身上。
+		const room = existing && existing.status === "active" ? existing : startSession(roomId, existing);
+
+		if (room !== existing) {
 			const resMsg: ResInterface = {
 				status: 200,
-				data: { hostPeerId: "", needCreate: true, deleteIntervalMs: heartContinuationTimeMs, iceServers, hostLeaseToken: roomMap.get(roomId)!.hostLeaseToken, hostEpoch: 0 },
+				data: {
+					hostPeerId: "",
+					needCreate: true,
+					deleteIntervalMs: hostHeartbeatIntervalMs,
+					iceServers,
+					hostLeaseToken: room.hostLeaseToken,
+					hostEpoch: room.hostEpoch,
+				},
+			};
+			res.status(resMsg.status).json(resMsg);
+		} else if (room.hostPeerId !== null) {
+			const resMsg: ResInterface = {
+				status: 200,
+				data: { hostPeerId: room.hostPeerId, needCreate: false, iceServers, hostEpoch: room.hostEpoch },
+			};
+			res.status(resMsg.status).json(resMsg);
+		} else {
+			const resMsg: ResInterface = {
+				status: 202,
+				msg: "服务器正在与房主建立联系, 请稍后重试...",
 			};
 			res.status(resMsg.status).json(resMsg);
 		}
@@ -136,7 +158,7 @@ roomRouter.post("/emit-host", async (req, res, next) => {
 			item.hostEpoch++;
 			item.hostName = hostName;
 			item.hostId = hostId;
-			item.deleteTime = Date.now() + heartContinuationTimeMs;
+			item.deleteTime = Date.now() + hostLeaseTtlMs;
 
 			const resMsg: ResInterface = {
 				status: 200,
@@ -185,7 +207,7 @@ roomRouter.get("/heart", async (req, res) => {
 		return;
 	}
 	const now = Date.now();
-	room.deleteTime = now + heartContinuationTimeMs;
+	room.deleteTime = now + hostLeaseTtlMs;
 	room.lastHeartTime = now;
 	res.status(200).end();
 });
