@@ -165,8 +165,11 @@ export interface IPlayer {
 	/**
 	 * 传送到指定位置
 	 * @param positionIndex - 目标位置索引
+	 * @param viaMapItemIds - 可选。途经地块的 ID（有序），只影响移动动画：
+	 *   棋子会沿这些地块依次飞过去，而不是原地消失再出现。
+	 *   这些地块不需要在 mapIndex 里，也不会触发事件或计入步数 —— 逻辑上依旧是一次传送。
 	 */
-	tp: (positionIndex: number) => Promise<void>;
+	tp: (positionIndex: number, viaMapItemIds?: string[]) => Promise<void>;
 
 	/**
 	 * 掷骰子

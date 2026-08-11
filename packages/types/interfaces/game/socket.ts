@@ -530,6 +530,11 @@ export interface SocketMessageDataType {
 			positionIndex: number;
 			/** 行走 ID */
 			walkId: string;
+			/**
+			 * 途经的地块 ID（有序）。传给客户端做「沿路飞过去」的演出用，
+			 * 逻辑上仍然是一次传送 —— 这些地块不在 mapIndex 里，不触发任何事件、也不计步数。
+			 */
+			viaMapItemIds?: string[];
 		};
 	};
 

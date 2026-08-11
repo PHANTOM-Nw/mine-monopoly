@@ -372,8 +372,8 @@ export class Player implements IPlayer {
 		await this.commandBus.execute({ type: "player.walk", payload: { steps } });
 	}
 
-	public async tp(positionIndex: number): Promise<void> {
-		await this.commandBus.execute({ type: "player.tp", payload: { positionIndex } });
+	public async tp(positionIndex: number, viaMapItemIds?: string[]): Promise<void> {
+		await this.commandBus.execute({ type: "player.tp", payload: { positionIndex, viaMapItemIds } });
 	}
 
 	public async rollDices(): Promise<DiceResult[]> {

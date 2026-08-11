@@ -84,8 +84,9 @@ export interface PlayerCommandMap extends ICommandMap {
 	 * 玩家传送到指定位置
 	 */
 	"player.tp": {
-		payload: { positionIndex: number };
-		result: { positionIndex: number };
+		/** viaMapItemIds：可选的途经地块，仅用于移动动画，不触发事件也不计步数 */
+		payload: { positionIndex: number; viaMapItemIds?: string[] };
+		result: { positionIndex: number; viaMapItemIds?: string[] };
 	};
 
 	// ===== 游戏事件相关命令 =====

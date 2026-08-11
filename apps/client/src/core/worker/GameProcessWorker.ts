@@ -1705,19 +1705,21 @@ export class GameProcess implements IGameProcess {
 
 			player.commandBus.setHandler("player.tp", async (payload) => {
 				this.setCurrentEventName(`${player.name} 正在传送`);
-				const { positionIndex } = payload;
+				const { positionIndex, viaMapItemIds } = payload;
 				const walkId = randomString(16);
 				const msg: ServerSocketMessage = {
 					type: SocketMsgType.PlayerTp,
 					source: SocketMsgSource.Server,
-					data: { playerId: player.id, positionIndex, walkId },
+					data: { playerId: player.id, positionIndex, walkId, viaMapItemIds },
 				};
 				player.setPositionIndex(positionIndex);
 				this.gameDataBroadcast();
 				this.gameBroadcast(msg);
 
-				// 等待动画完成
-				await this.waitForAnimationComplete(walkId, 2000);
+				// 等待动画完成。带途经点时棋子要一格格飞过去，2 秒根本不够，
+				// 超时会导致后续流程抢在动画前面跑。
+				const viaCount = viaMapItemIds?.length ?? 0;
+				await this.waitForAnimationComplete(walkId, 2000 + viaCount * 250);
 
 				return payload;
 			});
