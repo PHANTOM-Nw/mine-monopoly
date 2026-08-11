@@ -44,6 +44,20 @@ async function bootstrap() {
 
 		app.use("/static", express.static("public"));
 
+		// API 响应一律不进缓存。
+		//
+		// 这些接口返回的全是"此刻"的状态（房间在不在、房主是谁、地图列表），没有一条
+		// 适合被缓存。而 HTTP 里 410 / 404 这类状态码是**默认可缓存**的（RFC 7231 §6.1），
+		// 不显式声明的话浏览器会做启发式缓存 —— 真出过事：房间过期时 /room-router/join
+		// 回了一次 410，浏览器把它存进磁盘缓存，之后同一个房间号的请求全部命中缓存、
+		// 根本不发到服务器，服务端早就修好了用户那边还是 410，硬刷新才能解开。
+		//
+		// 放在 /static 之后，所以不影响头像、地图产物这些真正该缓存的静态资源。
+		app.use((req, res, next) => {
+			res.setHeader("Cache-Control", "no-store");
+			next();
+		});
+
 		app.use(roleValidation); //身份验证
 
 		// 定时清理超时在线用户

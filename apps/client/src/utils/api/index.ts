@@ -23,6 +23,13 @@ const getApiBaseUrl = () => {
 const apiClient = axios.create({
 	baseURL: getApiBaseUrl(),
 	timeout: 15000,
+	// 请求头里的 no-cache 会强制浏览器回源校验，不许直接吃本地缓存。
+	//
+	// 服务端已经统一回 Cache-Control: no-store，但那只管得住"以后"的响应 ——
+	// 已经被缓存下来的旧响应，浏览器压根不会再发请求，也就永远拿不到那个 no-store，
+	// 只能靠用户硬刷新。曾经就是这样：房间过期时 /room-router/join 回过一次 410
+	// （这个状态码默认可缓存），之后同一个房间号在那台机器上就再也进不去了。
+	headers: { "Cache-Control": "no-cache" },
 });
 
 // Symbol 标记：用于标记已在拦截器中处理过的错误
