@@ -107,6 +107,8 @@ export class GameRenderer {
 
 	private playerEntities: Map<string, PlayerModel> = new Map<string, PlayerModel>();
 	private housesModules: Map<string, THREE.Group> = new Map<string, THREE.Group>();
+	/** 地产归属边框：propertyId → 套在地块最外圈的方环 */
+	private propertyOwnerRings: Map<string, THREE.Mesh> = new Map();
 	private housesItems: Map<string, { group: THREE.Group; textSprite: TextSprite }> = new Map<
 		string,
 		{ group: THREE.Group; textSprite: TextSprite }
@@ -1280,7 +1282,12 @@ export class GameRenderer {
 				}
 			},
 		);
-		useEventBus().on("player-tp", async (tpPlayerId: string, positionIndex: number, walkId: string) => {
+		useEventBus().on("player-tp", async (
+			tpPlayerId: string,
+			positionIndex: number,
+			walkId: string,
+			viaMapItemIds?: string[],
+		) => {
 			const playerEntity = this.getPlayerEntity(tpPlayerId);
 
 			if (playerEntity) {
@@ -1294,29 +1301,62 @@ export class GameRenderer {
 				// 1. 记录原始朝向
 				const originalDir = Math.sign(body.scale.x) || 1;
 
-				// 2. 消失动画
-				await gsap.to(body.scale, {
-					x: 0,
-					duration: 0.5,
-					ease: "back.in(1.7)",
-				});
-
-				// 3. 执行位移 (瞬间) - 修复高度问题
+				// 途经点：地图可以给 tp 传一串地块，让棋子沿着它们飞过去而不是原地闪现。
+				// 这些地块不在 mapIndex 里（引擎的移动是单环模型，没有分支），
+				// 所以纯粹是演出 —— 不触发事件、不计步数，逻辑上依旧是一次传送。
+				const via = (viaMapItemIds ?? [])
+					.map((id) => this.mapItemsInScene.get(id))
+					.filter((item): item is THREE.Group => !!item);
 				const mapItem = this.getMapItem(positionIndex);
-				if (mapItem) {
-					const { x, z } = mapItem.position;
-					const surfaceY = this.getMapItemSurfaceHeight(mapItem);
-					model.position.set(x, surfaceY, z);
-				}
-				this.playerPosition.set(tpPlayerId, positionIndex);
 
-				// 4. 出现动画
-				await gsap.to(body.scale, {
-					x: originalDir,
-					duration: 0.5,
-					delay: 0.1,
-					ease: "back.out(1.7)",
-				});
+				if (via.length) {
+					const FLY_HEIGHT = 0.55;
+					// 先抬起来，再一格格掠过，最后落地
+					for (let i = 0; i < via.length; i++) {
+						const item = via[i]!;
+						await gsap.to(model.position, {
+							x: item.position.x,
+							y: this.getMapItemSurfaceHeight(item) + FLY_HEIGHT,
+							z: item.position.z,
+							// 第一跳是起飞，慢一点；之后匀速掠过
+							duration: i === 0 ? 0.32 : 0.16,
+							ease: i === 0 ? "power2.out" : "none",
+						});
+					}
+					if (mapItem) {
+						await gsap.to(model.position, {
+							x: mapItem.position.x,
+							y: this.getMapItemSurfaceHeight(mapItem),
+							z: mapItem.position.z,
+							duration: 0.34,
+							ease: "power2.in",
+						});
+					}
+					this.playerPosition.set(tpPlayerId, positionIndex);
+				} else {
+					// 2. 消失动画
+					await gsap.to(body.scale, {
+						x: 0,
+						duration: 0.5,
+						ease: "back.in(1.7)",
+					});
+
+					// 3. 执行位移 (瞬间) - 修复高度问题
+					if (mapItem) {
+						const { x, z } = mapItem.position;
+						const surfaceY = this.getMapItemSurfaceHeight(mapItem);
+						model.position.set(x, surfaceY, z);
+					}
+					this.playerPosition.set(tpPlayerId, positionIndex);
+
+					// 4. 出现动画
+					await gsap.to(body.scale, {
+						x: originalDir,
+						duration: 0.5,
+						delay: 0.1,
+						ease: "back.out(1.7)",
+					});
+				}
 
 				this.currentFocusModule = null;
 				this.isLockingRole = false;
@@ -1587,6 +1627,58 @@ export class GameRenderer {
 		this.chanceCardTargetOutlinePass.selectedObjects = models;
 	}
 
+	/**
+	 * 地产归属的边框：套在地块最外圈，颜色就是业主色。
+	 * 原来归属只靠文字牌的颜色表示，整盘扫过去很难一眼看出哪块是谁的。
+	 * @param color 传空表示无主，移除边框
+	 */
+	private syncOwnerRing(propertyId: string, tileModel: THREE.Object3D, surfaceY: number, color?: string) {
+		const existing = this.propertyOwnerRings.get(propertyId);
+		if (existing) {
+			this.mapContainer.remove(existing);
+			existing.geometry.dispose();
+			(existing.material as THREE.Material).dispose();
+			this.propertyOwnerRings.delete(propertyId);
+		}
+		if (!color) return;
+
+		// 外方内空的方环。用 ShapeGeometry 打个洞，比拼四条边省事，
+		// 也不会在四个角上叠出接缝。
+		const OUTER = 0.98;
+		const INNER = 0.84;
+		const shape = new THREE.Shape();
+		shape.moveTo(-OUTER / 2, -OUTER / 2);
+		shape.lineTo(OUTER / 2, -OUTER / 2);
+		shape.lineTo(OUTER / 2, OUTER / 2);
+		shape.lineTo(-OUTER / 2, OUTER / 2);
+		shape.closePath();
+		// 洞的绕向必须和外框相反，否则挖不出来
+		const hole = new THREE.Path();
+		hole.moveTo(-INNER / 2, -INNER / 2);
+		hole.lineTo(-INNER / 2, INNER / 2);
+		hole.lineTo(INNER / 2, INNER / 2);
+		hole.lineTo(INNER / 2, -INNER / 2);
+		hole.closePath();
+		shape.holes.push(hole);
+
+		const ring = new THREE.Mesh(
+			new THREE.ShapeGeometry(shape),
+			new THREE.MeshBasicMaterial({
+				color: new THREE.Color(color),
+				side: THREE.DoubleSide,
+				transparent: true,
+				opacity: 0.95,
+				// 贴着地面画，关掉深度写入免得和格子顶面抢 z
+				depthWrite: false,
+			}),
+		);
+		ring.rotateX(-Math.PI / 2);
+		ring.position.set(tileModel.position.x, surfaceY + 0.02, tileModel.position.z);
+		ring.renderOrder = 2;
+		this.propertyOwnerRings.set(propertyId, ring);
+		this.mapContainer.add(ring);
+	}
+
 	private async updateBuilding(newProperty: PropertyInfo) {
 		const oldModel = this.housesItems.get(newProperty.id);
 		if (oldModel) {
@@ -1601,6 +1693,9 @@ export class GameRenderer {
 
 		// [修改] 获取目标格子的表面高度
 		const surfaceY = this.getMapItemSurfaceHeight(targetMapItemModel);
+
+		// 归属边框跟着业主走，无主时自动移除
+		this.syncOwnerRing(newProperty.id, targetMapItemModel, surfaceY, newProperty.owner?.color);
 
 		const modelIdList = newProperty.buildingModelIdList ?? mapInfo.buildingModelIdList;
 		if (!modelIdList || modelIdList.length === 0) return;
@@ -1664,8 +1759,9 @@ export class GameRenderer {
 				if (houseItem) {
 					const costList = newProperty.costList;
 					if (newProperty.owner) {
+						// 直接把业主名写在牌子上：只靠颜色区分，人一多就分不清谁是谁
 						houseItem.textSprite.updateText(
-							`${newProperty.name}\n过路费: ${Math.round(
+							`${newProperty.name}\n${newProperty.owner.username}\n过路费: ${Math.round(
 								costList[newProperty.level] * useGameData().currentMultiplier,
 							)}￥`,
 							newProperty.owner.color,

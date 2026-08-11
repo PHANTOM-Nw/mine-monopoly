@@ -595,8 +595,8 @@ const handlePlayerWalk: ServerMessageHandler<SocketMsgType.PlayerWalk> = (msg) =
 
 const handlePlayerTp: ServerMessageHandler<SocketMsgType.PlayerTp> = (msg) => {
 	if (!msg.data) return;
-	const { playerId, positionIndex, walkId } = msg.data;
-	useEventBus().emit("player-tp", playerId, positionIndex, walkId);
+	const { playerId, positionIndex, walkId, viaMapItemIds } = msg.data;
+	useEventBus().emit("player-tp", playerId, positionIndex, walkId, viaMapItemIds);
 };
 
 const handleGameOver: ServerMessageHandler<SocketMsgType.GameOver> = (msg) => {
