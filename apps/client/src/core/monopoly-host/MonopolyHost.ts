@@ -138,7 +138,8 @@ export class MonopolyHost {
 						return;
 					}
 				} else {
-					if (this.room.getUserList().length >= 6) {
+					// 与添加 AI 共用座位口径：旁观房主不占座、AI 占座
+					if (this.room.isSeatFull()) {
 						conn.send(
 							JSON.stringify(<SocketMessage>{
 								type: SocketMsgType.MsgNotify,

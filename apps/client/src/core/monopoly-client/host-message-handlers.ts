@@ -35,7 +35,7 @@ import PropertyInfoVue from "@src/components/common/property-card.vue";
 import { useGameData, useMapData, useResourceStore } from "@src/store/game";
 import { GameMap } from "@mine-monopoly/utils/protos/game-map";
 import { loadGameMapFromFile, loadGameMapFromServer } from "@src/utils/file/game-map";
-import { base64ToArrayBuffer } from "@mine-monopoly/utils";
+import { base64ToArrayBuffer, clampRoomPlayerLimit } from "@mine-monopoly/utils";
 import { showTargetSelector } from "@src/components/common/target-seletor";
 import { showItemSelector } from "@src/components/utils/item-selector";
 import { FPMessageCard } from "../../components/utils/fp-message-card/index";
@@ -283,7 +283,12 @@ const handleKickOutReply: ServerMessageHandler<SocketMsgType.KickOut> = (msg, cl
 const handleRoomInfoReply: ServerMessageHandler<SocketMsgType.RoomInfo> = (msg) => {
 	const roomInfoData = msg.data;
 	const roomInfoStore = useRoomInfo();
-	roomInfoData && roomInfoStore.$patch(roomInfoData);
+	if (!roomInfoData) return;
+	// 旧版本房主不带此字段，收敛一次避免脏值把座位列表撑坏
+	if (roomInfoData.maxPlayers !== undefined) {
+		roomInfoData.maxPlayers = clampRoomPlayerLimit(roomInfoData.maxPlayers);
+	}
+	roomInfoStore.$patch(roomInfoData);
 };
 
 const handleChangeMap: ServerMessageHandler<SocketMsgType.ChangeMap> = async (msg, client) => {

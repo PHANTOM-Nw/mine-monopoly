@@ -177,6 +177,9 @@ export class WebRtcSessionManager {
 	public setSpectatorMode(enabled: boolean) {
 		return this.host?.getRoom().setOwnerSpectatorMode(enabled) ?? { success: false, error: "只有房主可以切换旁观模式" };
 	}
+	public setMaxPlayers(value: number) {
+		return this.host?.getRoom().setMaxPlayers(value) ?? { success: false, error: "只有房主可以修改人数上限" };
+	}
 	public changeRoleForUser(userId: string, roleId: string) {
 		return this.host?.getRoom().changeRole(userId, roleId) ?? { success: false, error: "只有房主可以修改角色" };
 	}

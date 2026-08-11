@@ -12,6 +12,7 @@ import {
 	User,
 	UserInRoomInfo,
 } from "@mine-monopoly/types";
+import { DEFAULT_ROOM_PLAYERS } from "@mine-monopoly/utils/game";
 import { isFullScreen, isLandscape, setTimeOutAsync } from "@src/utils";
 import { getUserByToken } from "@src/utils/api/user";
 import { getPlatformType } from "@src/utils/platform";
@@ -95,6 +96,7 @@ export const useRoomInfo = defineStore("roomInfo", {
 			isStarted: false,
 			ownerId: "",
 			ownerName: "",
+			maxPlayers: DEFAULT_ROOM_PLAYERS,
 			userList: new Array<UserInRoomInfo>(),
 			roleList: new Array<RoleInRoom>(),
 			gameSettingForm: new Array<FormSchema>(),
