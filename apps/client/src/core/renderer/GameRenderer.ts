@@ -425,6 +425,7 @@ export class GameRenderer {
 		if (!bgResource) return;
 
 		const bgTexture = bgTextureLoader.load(bgResource.url);
+		bgTexture.colorSpace = THREE.SRGBColorSpace;
 
 		this.scene.background = bgTexture;
 		this.scene.add(this.mapContainer);
