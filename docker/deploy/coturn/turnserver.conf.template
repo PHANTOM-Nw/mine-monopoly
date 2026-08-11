@@ -25,7 +25,11 @@ listening-ip=0.0.0.0
 # 改完用 `node scripts/check-turn.mjs <公网IP>` 验证中继地址是不是公网的。
 external-ip=__EXTERNAL_IP__
 
-relay-ports=__RELAY_MIN__-__RELAY_MAX__
+# ⚠ 不是 relay-ports —— coturn 没有这个选项名，写了会被静默忽略（不报错、不告警），
+# 于是中继实际用的是默认的 49152-65535，而安全组只放行了你以为的那一小段。
+# 真正的选项是 min-port / max-port。用 `turnserver -h | grep -- -port` 可以核对。
+min-port=__RELAY_MIN__
+max-port=__RELAY_MAX__
 
 # TLS 证书（turns: 协议必需，浏览器要求有效证书）
 # 证书目录由 COTURN_CERTS_PATH 挂载到 /etc/coturn/certs，需含 fullchain.pem / privkey.pem。

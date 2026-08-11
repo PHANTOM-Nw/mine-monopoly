@@ -342,9 +342,15 @@ TURN_SECRET=<你的 secret> node scripts/check-turn.mjs <公网IP>   # 顺带验
 | Allocate 不要凭证就成功 | coturn 没开认证，是开放中继 | 打开 `use-auth-secret`，否则谁都能白嫖你的带宽 |
 | `turns:` 端口连不上 | TURN_PORT 上没起 TLS，或用裸 IP 部署签不出证书 | 设 `TURN_TLS_ENABLED=false`，别把连不上的 turns: 下发给浏览器白等超时 |
 | Allocate 成功但依然连不上 | 中继端口段没放行 | 云安全组要放行 `COTURN_RELAY_MIN`-`COTURN_RELAY_MAX` 整段 UDP，只放 3478 不够 |
+| 中继端口不在你配的范围内 | 配置写成了 `relay-ports=` | coturn 没有这个选项名，会被**静默忽略**，实际用默认的 49152-65535。正确写法是 `min-port=` / `max-port=` 两行 |
 
-注意 `EXTERNAL_IP` 默认回落到 `MONOPOLY_DOMAIN`。如果 `MONOPOLY_DOMAIN` 填的是**域名**，
-这个默认值对 coturn 是无效的（它要 IP），必须单独配 `EXTERNAL_IP` 变量。
+两个默认值的坑：
+
+- `EXTERNAL_IP` 回落到 `MONOPOLY_DOMAIN`。如果 `MONOPOLY_DOMAIN` 填的是**域名**，
+  这个默认值对 coturn 无效（它要 IP），必须单独配 `EXTERNAL_IP`。
+- 目标机上如果已经有一份 coturn，先确认 systemd 实际加载的是哪个配置文件：
+  `ps -eo args | grep [t]urnserver` 看 `-c` 指向哪里。Debian/Ubuntu 的包会同时留下
+  `/etc/turnserver.conf` 和 `/etc/coturn/turnserver.conf`，改错文件是常见的白改。
 
 ### 多站点共存的注意事项
 

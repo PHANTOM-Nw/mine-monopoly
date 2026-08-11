@@ -30,13 +30,15 @@ import { fileURLToPath } from "node:url";
 
 // ── STUN/TURN 协议常量 ───────────────────────────────────────────────
 const MAGIC = 0x2112a442;
-const METHOD = { BINDING: 0x0001, ALLOCATE: 0x0003 };
+const METHOD = { BINDING: 0x0001, ALLOCATE: 0x0003, CREATE_PERMISSION: 0x0008, DATA: 0x0007 };
 const CLASS = { REQUEST: 0x0000, SUCCESS: 0x0100, ERROR: 0x0110 };
 const ATTR = {
 	MAPPED_ADDRESS: 0x0001,
 	USERNAME: 0x0006,
 	MESSAGE_INTEGRITY: 0x0008,
 	ERROR_CODE: 0x0009,
+	XOR_PEER_ADDRESS: 0x0012,
+	DATA: 0x0013,
 	REALM: 0x0014,
 	NONCE: 0x0015,
 	XOR_RELAYED_ADDRESS: 0x0016,
@@ -54,8 +56,12 @@ const C = {
 };
 
 const problems = [];
-const fail = (msg, fix) => problems.push({ level: "fatal", msg, fix });
-const warn = (msg, fix) => problems.push({ level: "warn", msg, fix });
+// 同一条结论可能被多个传输方式各报一次（udp/tcp 各测一遍），结论区里只留一份
+const record = (level, msg, fix) => {
+	if (!problems.some((p) => p.msg === msg)) problems.push({ level, msg, fix });
+};
+const fail = (msg, fix) => record("fatal", msg, fix);
+const warn = (msg, fix) => record("warn", msg, fix);
 
 // ── 报文编解码 ───────────────────────────────────────────────────────
 function pad4(n) {
@@ -92,6 +98,7 @@ function decodeMessage(buf) {
 	if (buf.length < 20) return null;
 	const type = buf.readUInt16BE(0);
 	const len = buf.readUInt16BE(2);
+	const txId = buf.subarray(8, 20);
 	const attrs = new Map();
 	let off = 20;
 	const end = Math.min(20 + len, buf.length);
@@ -101,7 +108,7 @@ function decodeMessage(buf) {
 		attrs.set(at, buf.subarray(off + 4, off + 4 + al));
 		off += 4 + al + pad4(al);
 	}
-	return { cls: type & 0x0110, method: type & 0x3eef, attrs };
+	return { cls: type & 0x0110, method: type & 0x3eef, txId, attrs };
 }
 
 function readAddress(buf, xor, txId) {
@@ -136,7 +143,7 @@ function isPrivate(ip) {
 }
 
 // ── 传输层 ───────────────────────────────────────────────────────────
-function udpExchange(host, port, msg, timeout = 3000, retries = 2) {
+function udpExchange(host, port, msg, timeout = 2500, retries = 3) {
 	return new Promise((resolve, reject) => {
 		const sock = dgram.createSocket("udp4");
 		let attempt = 0;
@@ -363,12 +370,162 @@ async function checkTls(host, tlsPort) {
 	});
 }
 
-function checkRelayPorts(host) {
-	console.log(C.b(`\n[4/4] 中继端口段`));
-	console.log(
-		`  ${C.dim("提示")} coturn 的 relay-ports（默认 49160-49200）必须整段在云安全组里放行 UDP，` +
-			`\n       只放 3478 是不够的 —— Allocate 会成功，但真正的数据走的是这一段。`,
-	);
+function encodePeer(ip, port) {
+	const buf = Buffer.alloc(8);
+	buf.writeUInt8(0, 0);
+	buf.writeUInt8(1, 1); // IPv4
+	buf.writeUInt16BE(port ^ (MAGIC >>> 16), 2);
+	const raw = Buffer.from(ip.split(".").map(Number));
+	const mask = Buffer.alloc(4);
+	mask.writeUInt32BE(MAGIC);
+	for (let i = 0; i < 4; i++) buf[4 + i] = raw[i] ^ mask[i];
+	return buf;
+}
+
+/**
+ * 真正跑一遍中继：Allocate → CreatePermission → 从另一个 socket 往中继地址打一包 →
+ * 看它有没有被转回来。
+ *
+ * 前三步全绿但这一步不通，说明中继端口段没在防火墙/云安全组里放行 —— 这是最容易
+ * 漏的一环，因为 Allocate 走的是 3478，而真正的音视频/数据走的是 min-port~max-port
+ * 那一段。只测 Allocate 会给出"一切正常"的假象。
+ */
+async function checkRelayReachable(host, port, secret) {
+	console.log(C.b(`\n[4/4] 中继端口实际连通性`));
+	const sock = dgram.createSocket("udp4");
+	const inbox = [];
+	const waiters = [];
+	sock.on("message", (d) => {
+		const w = waiters.shift();
+		if (w) w(d);
+		else inbox.push(d);
+	});
+	const recv = (timeout = 5000) =>
+		new Promise((resolve, reject) => {
+			if (inbox.length) return resolve(inbox.shift());
+			const timer = setTimeout(() => {
+				const i = waiters.indexOf(push);
+				if (i >= 0) waiters.splice(i, 1);
+				reject(new Error("timeout"));
+			}, timeout);
+			const push = (d) => {
+				clearTimeout(timer);
+				resolve(d);
+			};
+			waiters.push(push);
+		});
+	const send = (msg) => new Promise((res, rej) => sock.send(msg, port, host, (e) => (e ? rej(e) : res())));
+
+	/**
+	 * 发一个请求并等它的响应，按 transaction ID 配对。
+	 *
+	 * UDP 上的 STUN 本来就要求客户端自己重传（RFC 5389 §7.2.1）—— 跨境链路丢一两个包
+	 * 很正常，不重传的话这一步会假报"不通"。重传必须原样重发同一条报文（txId 不变），
+	 * 否则服务端会当成新事务。
+	 */
+	const request = async (method, attrs, key, attempts = 3) => {
+		const msg = buildMessage(method, CLASS.REQUEST, crypto.randomBytes(12), attrs, key);
+		const txId = msg.subarray(8, 20);
+		for (let i = 0; i < attempts; i++) {
+			await send(msg);
+			try {
+				// 丢弃迟到的、属于上一个事务的响应
+				for (;;) {
+					const res = decodeMessage(await recv(2500));
+					if (res && res.txId.equals(txId)) return res;
+				}
+			} catch {
+				/* 超时，重发 */
+			}
+		}
+		throw new Error("timeout");
+	};
+
+	try {
+		const reqTransport = encodeAttr(ATTR.REQUESTED_TRANSPORT, Buffer.from([0x11, 0, 0, 0]));
+		let res = await request(METHOD.ALLOCATE, [reqTransport]);
+		let authAttrs = [];
+
+		const err = readError(res.attrs);
+		if (err?.code === 401 || err?.code === 438) {
+			if (!secret) {
+				console.log(`  ${C.warn("?")} 需要凭证，跳过（带上 TURN_SECRET 重跑）`);
+				return;
+			}
+			const realm = res.attrs.get(ATTR.REALM)?.toString("utf8") ?? "";
+			const nonce = res.attrs.get(ATTR.NONCE) ?? Buffer.alloc(0);
+			const username = `${Math.floor(Date.now() / 1000) + Number(process.env.TURN_TTL || 86400)}:turn-healthcheck`;
+			const password = crypto.createHmac("sha1", secret).update(username).digest("base64");
+			const key = crypto.createHash("md5").update(`${username}:${realm}:${password}`).digest();
+			authAttrs = [
+				encodeAttr(ATTR.USERNAME, Buffer.from(username, "utf8")),
+				encodeAttr(ATTR.REALM, Buffer.from(realm, "utf8")),
+				encodeAttr(ATTR.NONCE, nonce),
+			];
+			res = await request(METHOD.ALLOCATE, [reqTransport, ...authAttrs], key);
+			// 认证态下后续请求都要带 integrity，把 key 记下来
+			authAttrs.key = key;
+		}
+		if (readError(res.attrs)) {
+			console.log(`  ${C.bad("✗")} Allocate 失败，跳过`);
+			return;
+		}
+		const relay = readAddress(res.attrs.get(ATTR.XOR_RELAYED_ADDRESS), true);
+		const mine = readAddress(res.attrs.get(ATTR.XOR_MAPPED_ADDRESS), true);
+		if (!relay || !mine) {
+			console.log(`  ${C.bad("✗")} 响应缺少中继地址或映射地址，跳过`);
+			return;
+		}
+
+		// 放行自己的公网 IP，否则中继会把包直接丢掉
+		const permRes = await request(
+			METHOD.CREATE_PERMISSION,
+			[encodeAttr(ATTR.XOR_PEER_ADDRESS, encodePeer(mine.ip, 0)), ...authAttrs],
+			authAttrs.key,
+		);
+		const permErr = readError(permRes.attrs);
+		if (permErr) {
+			console.log(`  ${C.bad("✗")} CreatePermission 失败 ${permErr.code} ${permErr.reason}`);
+			return;
+		}
+
+		// 换一个 socket，模拟"另一个玩家从公网打进中继端口"。
+		// 这里同样要重试：探测包和回程的 Data indication 各自都可能丢。
+		const probe = Buffer.from(`turn-healthcheck-${crypto.randomBytes(4).toString("hex")}`);
+		let relayed = false;
+		for (let i = 0; i < 3 && !relayed; i++) {
+			const peer = dgram.createSocket("udp4");
+			await new Promise((res2, rej) => peer.send(probe, relay.port, relay.ip, (e) => (e ? rej(e) : res2())));
+			peer.close();
+			try {
+				for (;;) {
+					// 转回来的是 Data indication，里面原样带着刚才那串字节
+					const data = decodeMessage(await recv(2500));
+					if (data?.attrs.get(ATTR.DATA)?.equals(probe)) {
+						relayed = true;
+						break;
+					}
+				}
+			} catch {
+				/* 超时，再打一次 */
+			}
+		}
+		if (relayed) {
+			console.log(`  ${C.ok("✓")} ${C.b(relay.ip + ":" + relay.port)} 公网可达，中继转发正常`);
+		} else {
+			console.log(`  ${C.bad("✗")} 往中继地址 ${C.b(relay.ip + ":" + relay.port)} 发包收不到回程`);
+			fail(
+				`中继端口 ${relay.port}/udp 从公网打不进来 —— Allocate 成功但数据面不通`,
+				"云安全组 / 防火墙要放行 coturn min-port~max-port 整段 UDP（只放 3478 不够）",
+			);
+		}
+	} catch (e) {
+		console.log(`  ${C.warn("!")} 测试中断：${e.message}`);
+	} finally {
+		try {
+			sock.close();
+		} catch {}
+	}
 }
 
 // ── 读 .env ──────────────────────────────────────────────────────────
@@ -402,7 +559,7 @@ console.log(C.b(`TURN 体检  ${host}  明文端口 ${port}  TLS 端口 ${tlsPor
 const mapped = await checkStun(host, port);
 await checkTurn(host, port, tlsPort, secret);
 await checkTls(host, tlsPort);
-checkRelayPorts(host);
+await checkRelayReachable(host, port, secret);
 
 console.log(C.b("\n─── 结论 ───"));
 if (!problems.length) {
