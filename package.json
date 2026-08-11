@@ -29,7 +29,8 @@
 		"build-editor": "pnpm --filter @mine-monopoly/map-editor run build",
 		"check-client": "pnpm --filter @mine-monopoly/client run check",
 		"check-editor": "pnpm --filter @mine-monopoly/map-editor run check",
-		"check-all": "pnpm --filter @mine-monopoly/client run check && pnpm --filter @mine-monopoly/map-editor run check"
+		"check-all": "pnpm --filter @mine-monopoly/client run check && pnpm --filter @mine-monopoly/map-editor run check",
+		"check-turn": "node scripts/check-turn.mjs"
 	},
 	"keywords": ["monopoly", "game", "multiplayer", "webrtc", "vue", "typescript", "electron", "map-editor", "board-game", "p2p"],
 	"author": "Fat_Paper",

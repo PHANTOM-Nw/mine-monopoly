@@ -11,15 +11,32 @@ function getStunUrl(): string {
 	return `stun:${env<string>("TURN_URL")}:${env<number>("STUN_PORT")}`;
 }
 
+/**
+ * 是否下发 turns:（TURN over TLS）。
+ *
+ * turns: 要求 coturn 真的在 TURN_PORT 上监听且证书对得上域名 —— 裸 IP 部署签不出
+ * 公共 CA 证书，端口多半也没起。这种情况下把 turns: 塞进 iceServers 只会让浏览器
+ * 白等一轮连接失败，所以默认跟随站点协议，并允许用 TURN_TLS_ENABLED 显式覆盖。
+ */
+function isTurnTlsEnabled(): boolean {
+	const explicit = env<string>("TURN_TLS_ENABLED", "");
+	if (explicit) return explicit === "true" || explicit === "1";
+	return env<string>("PROTOCOL", "http") === "https";
+}
+
 function getTurnUrls(): string[] {
 	const baseUrl = env<string>("TURN_URL");
 	const tlsPort = env<number>("TURN_PORT");
-	const udpPort = env<number>("STUN_PORT"); // 3478
-	// 同时返回 TCP (TLS) 和 UDP TURN，让 ICE 自动选择最佳路径
-	return [
-		`turns:${baseUrl}:${tlsPort}?transport=tcp`,  // TCP over TLS（移动网络友好）
-		`turn:${baseUrl}:${udpPort}?transport=udp`,    // UDP（低延迟，局域网友好）
+	const plainPort = env<number>("STUN_PORT"); // 3478
+	// 多条路径都给上，让 ICE 自己挑：UDP 最快，TCP 用来兜住封 UDP 的网络。
+	const urls = [
+		`turn:${baseUrl}:${plainPort}?transport=udp`,
+		`turn:${baseUrl}:${plainPort}?transport=tcp`,
 	];
+	if (isTurnTlsEnabled()) {
+		urls.push(`turns:${baseUrl}:${tlsPort}?transport=tcp`); // TLS，穿过只放行 443/TLS 的网络
+	}
+	return urls;
 }
 
 function generateTurnCredentials(userId: string): { username: string; credential: string } {
@@ -34,19 +51,17 @@ function generateTurnCredentials(userId: string): { username: string; credential
 }
 
 /**
- * 生成 iceServers 配置。
- * - 有 userId：返回 STUN + TURN（带动态凭证）
- * - 无 userId（游客）：仅返回 STUN
+ * 生成 iceServers 配置：STUN + TURN（带 HMAC 动态凭证）。
+ *
+ * 游客同样要给 TURN。公网上大量玩家在对称 NAT / 运营商 CGNAT 后面，打洞必然失败，
+ * 只有 relay 能连上 —— 以前游客只拿 STUN，表现就是"局域网能玩、公网连不上"。
+ * userId 只是写进 TURN username 里方便在 coturn 侧区分用量，不参与鉴权。
  */
 export function generateIceServers(userId?: string): IceServer[] {
 	const servers: IceServer[] = [{ urls: getStunUrl() }];
-	if (userId) {
-		const { username, credential } = generateTurnCredentials(userId);
-		// 同时添加 TCP (TLS) 和 UDP TURN，让 ICE 自动选择最佳路径
-		const turnUrls = getTurnUrls();
-		for (const url of turnUrls) {
-			servers.push({ urls: url, username, credential });
-		}
+	const { username, credential } = generateTurnCredentials(userId || "guest");
+	for (const url of getTurnUrls()) {
+		servers.push({ urls: url, username, credential });
 	}
 	return servers;
 }

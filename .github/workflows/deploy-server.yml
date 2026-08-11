@@ -449,6 +449,9 @@ jobs:
           STUN_PORT=${{ vars.STUN_PORT || '3478' }}
           TURN_TTL=${{ vars.TURN_TTL || '86400' }}
           TURN_SECRET=${TURN_SECRET}
+          # 留空则跟随 PROTOCOL。coturn 没起 TLS、或者裸 IP 部署（签不出证书）时设 false，
+          # 免得浏览器为一条连不上的 turns: 白等超时。
+          TURN_TLS_ENABLED=${{ vars.TURN_TLS_ENABLED || '' }}
           EXTERNAL_IP=${{ vars.EXTERNAL_IP || vars.MONOPOLY_DOMAIN }}
           COTURN_METRICS_URL=${{ vars.COTURN_METRICS_URL || 'http://host.docker.internal:9641/metrics' }}
           COTURN_CERTS_PATH=${{ vars.COTURN_CERTS_PATH || './coturn/certs' }}
