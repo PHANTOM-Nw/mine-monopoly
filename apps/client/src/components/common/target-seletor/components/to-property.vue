@@ -69,13 +69,21 @@ const currentSelectedProperty = computed(() => {
 	align-items: flex-start;
 	gap: 2rem;
 	padding: 1rem;
-	min-height: 28.125rem;
+	// 原本只有 min-height 没有上限：地皮详情卡很高（费用表 + 过路费网格 + 拥有者），
+	// 会把整个弹窗顶高，确认按钮被挤到视口外，必须滚动才点得到。
+	// 改成高度跟着视口收敛，超出的内容在各列内部滚动。
+	min-height: min(28.125rem, 46vh);
+	max-height: min(34rem, 62vh);
 
 	.target-container {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
+		// flex 子项默认 min-height:auto，不显式给 0 的话撑不住 max-height，内部也滚不起来
+		min-height: 0;
+		max-height: 100%;
+		overflow-y: auto;
 
 		.tips {
 			color: var(--fp-color-primary);
@@ -87,7 +95,11 @@ const currentSelectedProperty = computed(() => {
 
 	.preview-container {
 		width: 20rem;
-		min-height: 25rem;
+		flex: none;
+		// 同上：给 0 才能被 max-height 约束住，详情卡再高也只在这一列里滚
+		min-height: 0;
+		max-height: 100%;
+		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
 		border-left: 0.125rem dashed #e0e0e0;

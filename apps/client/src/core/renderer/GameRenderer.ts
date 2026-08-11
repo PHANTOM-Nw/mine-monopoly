@@ -127,6 +127,8 @@ export class GameRenderer {
 
 	private isLockingRole: boolean = false;
 	private isLockingRoleFromSetting: boolean = useSettig().lockRole;
+	/** 全局俯视模式：开着的时候不让跟随逻辑把镜头拽回玩家身上 */
+	private isOverview: boolean = false;
 	private isTurnFocusEnabled: boolean = useSettig().enableTurnFocus;
 
 	private currentFocusModule: THREE.Object3D | null = null;
@@ -249,10 +251,13 @@ export class GameRenderer {
 
 				const controls = new OrbitControls(this.camera, this.canvas);
 				controls.enableDamping = true;
-				controls.maxDistance = 30;
+				// 原来是 maxDistance 30 / minPolarAngle 60°，等于把视角锁死了：
+				// 极角最小 60° 意味着永远压不平、俯视不了；30 的距离上限在大盘地图上也拉不远看不全。
+				controls.maxDistance = 80;
 				controls.minDistance = 1;
 				controls.maxPolarAngle = Math.PI / 2;
-				controls.minPolarAngle = Math.PI / 3;
+				// 留 5° 不给到正上方：极角恰好为 0 时 OrbitControls 的方位角会失去参考、镜头打转
+				controls.minPolarAngle = Math.PI / 36;
 				controls.update();
 				this.controls = controls;
 
@@ -1546,6 +1551,9 @@ export class GameRenderer {
 		followAngleY: number,
 	) {
 		if (!targetObject) return;
+		// 全局俯视时不跟随。锁定视角下这个方法每帧都会被调用，
+		// 不在这里拦住的话，玩家刚切到俯视就会被立刻拽回角色身上。
+		if (this.isOverview) return;
 		controls.enabled = false;
 		const targetPos = targetObject.position;
 		const followPos = new THREE.Vector3();
@@ -1672,7 +1680,10 @@ export class GameRenderer {
 					const box = new THREE.Box3().setFromObject(propertyBuildModel);
 					// 计算边界框的高度
 					const size = box.getSize(new THREE.Vector3());
-					textSpriteModel.position.y = 1;
+					// 顶在建筑正上方。原先写死 1，高过 1 个世界单位的建筑（塔、楼阁一类）
+					// 会把地皮名和过路费整个埋进模型里。
+					// 这里 gsap 已经把 scale 动画到 1，包围盒取到的是真实高度。
+					textSpriteModel.position.y = size.y + 0.25;
 					propertyBuildModel.add(textSpriteModel);
 					houseItem.group = propertyBuildModel;
 				}
@@ -2191,6 +2202,50 @@ export class GameRenderer {
 	public toggleLockCamera() {
 		this.isLockingRole = !this.isLockingRole;
 		return this.isLockingRole;
+	}
+
+	/**
+	 * 切换「全局俯视」：把镜头抬到整张地图的正上方并居中，退出时交还给跟随逻辑。
+	 * @returns 切换后是否处于俯视模式
+	 */
+	public toggleOverview(): boolean {
+		if (this.isOverview) {
+			this.isOverview = false;
+			// 交还给跟随逻辑，并立刻贴回当前焦点，不然要等下一次事件才回位
+			if (this.currentFocusModule) this.updateCamera(this.controls, this.currentFocusModule, 8, 30);
+			return false;
+		}
+
+		const box = new THREE.Box3().setFromObject(this.mapContainer);
+		if (box.isEmpty()) return false;
+		const center = box.getCenter(new THREE.Vector3());
+		const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+
+		// 装下整张图要看**较窄**的那个视角：竖屏时水平视角比垂直视角窄，
+		// 只按垂直 fov 算的话两侧会被切掉。留 8% 余量当边距。
+		const fovV = THREE.MathUtils.degToRad(this.camera.fov);
+		const fovH = 2 * Math.atan(Math.tan(fovV / 2) * this.camera.aspect);
+		const dist = (radius / Math.sin(Math.min(fovV, fovH) / 2)) * 1.08;
+		this.controls.maxDistance = Math.max(this.controls.maxDistance, dist * 1.2);
+
+		// 不用正上方：完全垂直会把建筑压成一片平顶，纵深全失。
+		// 偏 14° 既能看全整盘，又保留一点立体感。
+		const tilt = THREE.MathUtils.degToRad(14);
+		this.isOverview = true;
+		this.controls.enabled = false;
+		gsap.to(this.controls.target, {
+			x: center.x, y: box.min.y, z: center.z,
+			duration: 0.6, ease: "power2.out",
+		});
+		gsap.to(this.camera.position, {
+			x: center.x,
+			y: box.min.y + dist * Math.cos(tilt),
+			z: center.z + dist * Math.sin(tilt),
+			duration: 0.6,
+			ease: "power2.out",
+			onComplete: () => { this.controls.enabled = true; },
+		});
+		return true;
 	}
 
 	private resolvePreferredFocusPlayerId(): string | null {
