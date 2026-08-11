@@ -324,6 +324,28 @@ grep -E "use-auth-secret|lt-cred-mech" /etc/coturn/turnserver.conf
    —— 纯 IP 签不出证书，`turns:` 必须有域名。
 2. 或者把现有 coturn 迁到 `use-auth-secret` 模式 —— 但要先确认没有别的服务在用它。
 
+### 公网连不上、只有局域网能联机
+
+先跑体检脚本，它会把 TURN 链路上每一环拆开报：
+
+```bash
+node scripts/check-turn.mjs <公网IP或域名>          # 不带 secret，只测连通性和中继地址
+TURN_SECRET=<你的 secret> node scripts/check-turn.mjs <公网IP>   # 顺带验证凭证匹配
+```
+
+按出现频率排，通常是这几个原因：
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 中继地址是 `172.x` / `10.x` | **coturn 少配 `external-ip`** | 云主机网卡上只有内网地址，coturn 不知道自己的公网 IP 就把内网地址当中继地址发出去。填 `external-ip=<公网IP>` 后重启。这是最隐蔽的一个 —— 端口、认证、日志全正常，就是连不上 |
+| Allocate 报 401 / 438 | coturn 的 `static-auth-secret` 和 `.env` 的 `TURN_SECRET` 对不上 | 两边改一致；coturn 必须是 `use-auth-secret` 模式 |
+| Allocate 不要凭证就成功 | coturn 没开认证，是开放中继 | 打开 `use-auth-secret`，否则谁都能白嫖你的带宽 |
+| `turns:` 端口连不上 | TURN_PORT 上没起 TLS，或用裸 IP 部署签不出证书 | 设 `TURN_TLS_ENABLED=false`，别把连不上的 turns: 下发给浏览器白等超时 |
+| Allocate 成功但依然连不上 | 中继端口段没放行 | 云安全组要放行 `COTURN_RELAY_MIN`-`COTURN_RELAY_MAX` 整段 UDP，只放 3478 不够 |
+
+注意 `EXTERNAL_IP` 默认回落到 `MONOPOLY_DOMAIN`。如果 `MONOPOLY_DOMAIN` 填的是**域名**，
+这个默认值对 coturn 是无效的（它要 IP），必须单独配 `EXTERNAL_IP` 变量。
+
 ### 多站点共存的注意事项
 
 目标机的 nginx 上如果已经有别的站点：

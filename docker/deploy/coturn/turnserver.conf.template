@@ -15,6 +15,14 @@
 listening-port=__LISTEN_PORT__
 tls-listening-port=__TLS_PORT__
 listening-ip=0.0.0.0
+
+# ⚠ 云主机上这行不能少，而且必须是**公网 IP**（不是域名）。
+# 阿里云/腾讯云的 ECS 网卡上只有内网地址（172.x / 10.x），公网 IP 是外面映射进来的。
+# coturn 不知道自己的公网 IP 时，会把网卡上的内网地址当作中继地址发给浏览器 ——
+# ICE 看着有 relay 候选，那个地址在公网上却根本路由不到，症状就是
+# "同一个 WiFi 下能联机、换成 4G 或异地就连不上"，而端口、认证、日志全都正常，极难查。
+# 单网卡填 external-ip=<公网IP> 即可；要显式写映射关系用 <公网IP>/<内网IP>。
+# 改完用 `node scripts/check-turn.mjs <公网IP>` 验证中继地址是不是公网的。
 external-ip=__EXTERNAL_IP__
 
 relay-ports=__RELAY_MIN__-__RELAY_MAX__
