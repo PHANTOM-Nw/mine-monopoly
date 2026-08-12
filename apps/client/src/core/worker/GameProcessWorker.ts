@@ -67,6 +67,7 @@ import { Player } from "./class/Player";
 import { Property } from "./class/Property";
 import { ChanceCard } from "./class/ChanceCard";
 import { compileTsToJs, randomString } from "@src/utils";
+import { asRuntimeFunction, NOOP_RUNTIME_FN } from "./utils/runtime-function";
 import { GamePhase } from "@src/core/worker/class/GamePhase";
 import { GameRuntimeStack } from "@src/core/worker/class/GameRuntimeStack";
 import GameProcessTypes from "./editor-lib.d.ts?raw";
@@ -938,7 +939,8 @@ export class GameProcess implements IGameProcess {
 			const runtimeEvent: RuntimeMapEvent = {
 				...mapEvent,
 				effectCode,
-				fn: new Function(effectCode)(),
+				// 事件代码留空同样是合法的（比如只想在格子上显示一个图标）
+				fn: asRuntimeFunction(new Function(effectCode)(), NOOP_RUNTIME_FN),
 			};
 			this.mapEvents.set(mapEvent.id, runtimeEvent);
 			this.gameBroadcast({
@@ -1574,7 +1576,16 @@ export class GameProcess implements IGameProcess {
 		const { phases } = this.mapData;
 		const gameOverRule = phases.gameOverRule;
 		const compiledCode = compileTsToJs(gameOverRule[0].initEventCode, this.fullTypes);
-		this.gameOverRuleFunction = new Function(compiledCode)() as () => Promise<string[] | true | false>;
+		const compiled = new Function(compiledCode)();
+		if (typeof compiled !== "function") {
+			// 结束规则空着属于地图没写全，但崩在 checkGameOver 里更难查：
+			// 退化成「永不结束」，让房主至少能进游戏、看到问题出在哪
+			console.warn("[initGameOverRuleFunction] 地图没有可用的游戏结束规则，本局将不会自动结束");
+		}
+		this.gameOverRuleFunction = asRuntimeFunction(
+			compiled,
+			(async () => false) as unknown as () => Promise<string[] | true | false>,
+		) as () => Promise<string[] | true | false>;
 	}
 
 	private initMap() {
@@ -1586,7 +1597,8 @@ export class GameProcess implements IGameProcess {
 				this.mapEvents.set(mapEvent.id, {
 					...mapEvent,
 					effectCode,
-					fn: new Function(effectCode)(),
+					// 事件代码留空同样是合法的（比如只想在格子上显示一个图标）
+				fn: asRuntimeFunction(new Function(effectCode)(), NOOP_RUNTIME_FN),
 				});
 			} catch (e: any) {
 				console.error(`[initMap] 地图事件 "${mapEvent.name || mapEvent.id}" 初始化失败:`, e);
@@ -1781,10 +1793,10 @@ export class GameProcess implements IGameProcess {
 			await this.runGamePhase(playerPreInitPhase);
 		}
 
-		// 步骤3: 执行每个玩家的 initRoleFn
+		// 步骤3: 执行每个玩家的 initRoleFn（角色可以不写初始化代码，这里再挡一道）
 		for (const player of this.players.values()) {
 			const roleInitFn = player.getInitRoleFunction();
-			roleInitFn(player, this);
+			if (typeof roleInitFn === "function") roleInitFn(player, this);
 		}
 	}
 

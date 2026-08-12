@@ -31,6 +31,7 @@ import { clone } from "lodash";
 import type { PlayerSnapshot } from "@src/core/save/types";
 import { ChanceCard } from "./ChanceCard";
 import { pickSerializableFields } from "../utils/serialize";
+import { asRuntimeFunction, NOOP_RUNTIME_FN } from "../utils/runtime-function";
 
 export class Player implements IPlayer {
 	public id: string;
@@ -123,7 +124,9 @@ export class Player implements IPlayer {
 		const fullTypes = extraLibs ? `${GameProcessTypes}\n${extraLibs}` : GameProcessTypes;
 		try {
 			const codeCompiled = compileTsToJs(role.initCode, fullTypes);
-			this.roleInitFunction = new Function(codeCompiled)();
+			// 角色不写初始化代码是合法的（编辑器允许留空，导出时也不会生成 .init.ts），
+			// 这时 new Function("")() 是 undefined 而不是抛错，必须在这里兜住
+			this.roleInitFunction = asRuntimeFunction(new Function(codeCompiled)(), NOOP_RUNTIME_FN);
 		} catch (e: any) {
 			const error = new Error(`角色代码编译失败 (${role.name}): ${e.message}`);
 			error.stack = e.stack;
