@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import PlayerCard from "@src/views/game/components/player-card.vue";
 import { useGameData } from "@src/store/game";
 
 const gameInfoStore = useGameData();
 
-const _currentRound = computed(() => gameInfoStore.currentRound);
+// currentRound 由地图脚本在「整轮结束」阶段递增，语义是**已经打完的轮数**，
+// 从 0 开始；同时它还被结束规则拿去和最大回合数比。
+// 所以这里 +1 只改显示：开局第一轮就写「第 1 回合」，而不是「第 0 回合」。
+const _currentRound = computed(() => gameInfoStore.currentRound + 1);
 const _currentMultiplier = computed(() => gameInfoStore.currentMultiplier);
 </script>
 

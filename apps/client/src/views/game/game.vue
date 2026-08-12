@@ -22,6 +22,7 @@
 	import CountdownTimer from "./components/countdown-timer.vue";
 	import scoreboard from "./components/scoreboard.vue";
 	import PlayerContainer from "./components/player-container.vue";
+	import RoundInfo from "./components/round-info.vue";
 	import GameButtonsPanel from "./components/game-buttons-panel.vue";
 	import { useGameData, useMapData } from "@src/store/game";
 	import { useUserInfo } from "@src/store";
@@ -253,6 +254,9 @@
 
 				<PlayerContainer />
 
+				<!-- 顶部居中的「第 N 回合 / 当前倍率」。组件早就写好了，只是一直没挂上来 -->
+				<RoundInfo />
+
 				<div class="tool-bar ui-item">
 					<button
 						class="border-button lock-camera"
@@ -341,9 +345,11 @@
 		// 右上角、玩家卡片列表(top:4.2rem)正上方那条带子：
 		// 0.6rem 上边距 + 3rem 按钮 = 3.6rem，刚好不压到卡片。
 		// 横排是因为这里高度只有 4.2rem，竖排放不下第二个。
+		// 放左上角：右上从 4.2rem 起是玩家卡片列表（挨得太近，卡片的圆角和阴影会压上来），
+		// 顶部居中留给回合信息，底部是卡牌和按钮面板 —— 只有这里是完全空的。
 		&.tool-bar {
 			position: absolute;
-			right: 0.8rem;
+			left: 0.8rem;
 			top: 0.6rem;
 			// 必须显式给层级：.ui-container 是 z-index:auto，不创建层叠上下文，
 			// 里面的东西是提升到 .game-page 里和 #game-canvas(--z-game:10) 一起排序的。
