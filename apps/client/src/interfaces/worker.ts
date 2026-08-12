@@ -127,6 +127,7 @@ interface WorkerCommDataTypeMap {
 	[WorkerCommType.EmitOperation]: EmitOperationResult<OperateType>;
 	[WorkerCommType.UserOffLine]: { userId: string };
 	[WorkerCommType.UserReconnect]: { userId: string };
+	[WorkerCommType.SpectatorJoin]: { userId: string };
 	[WorkerCommType.UpdateAIDecisionConfig]: AIDecisionConfig;
 	[WorkerCommType.ClearAIStrategyMemory]: { playerId?: string };
 	[WorkerCommType.AIDecisionResponse]: {

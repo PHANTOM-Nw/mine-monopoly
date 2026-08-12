@@ -14,6 +14,7 @@ import FpDialog from "@src/components/utils/fp-dialog/fp-dialog.vue";
 import LoginForm from "@src/views/login/components/login-form.vue";
 import HeroTitle from "@src/components/hero-title";
 import { vStagger } from "@src/directives";
+import { clearGuestIdentity, hasGuestIdentity, loadGuestIdentity, saveGuestIdentity } from "@src/utils/auth/guest";
 
 let loginCodeRenderer: LoginDiceRenderer | null;
 let diceRotate: boolean = true;
@@ -35,8 +36,7 @@ const touristColorInputRef = ref<HTMLInputElement | null>(null);
 function handleFirstClick() {
 	firstClick.value = true;
 	let token = localStorage.getItem("token") || "";
-	let userInfo = localStorage.getItem("user") || "";
-	const _needLogin = !token && !userInfo;
+	const _needLogin = !token && !hasGuestIdentity();
 	needLogin.value = _needLogin;
 	if (!_needLogin) {
 		getUserInfoToRoomList();
@@ -88,12 +88,11 @@ async function getUserInfoToRoomList() {
 					return;
 				}
 			}
-			let userInfo = localStorage.getItem("user") || "";
-			if (userInfo) {
-				//游客登录
-				const { userId, useraccount = "", username, avatar = "", color } = JSON.parse(userInfo);
+			//游客登录：localStorage 没有时会回退到 cookie
+			const guest = loadGuestIdentity();
+			if (guest) {
 				const userInfoStore = useUserInfo();
-				userInfoStore.$patch({ userId, useraccount, username, avatar, color });
+				userInfoStore.$patch(guest);
 				await setTimeOutAsync(1500);
 				if (loginCodeRenderer) await loginCodeRenderer.showImage("");
 				await setTimeOutAsync(2000, toRoomList);
@@ -106,7 +105,7 @@ async function getUserInfoToRoomList() {
 			message: e.response?.data?.msg || e.message || e || "在验证身份时发生了未知的错误",
 			onClosed: () => {
 				localStorage.removeItem("token");
-				localStorage.removeItem("user");
+				clearGuestIdentity();
 			},
 		});
 	}
@@ -141,7 +140,7 @@ function handleTouristLogin() {
 			message: "如此纯正的黑？你口味挺独特的🧐",
 		});
 	}
-	localStorage.setItem("user", JSON.stringify(userInfo));
+	saveGuestIdentity(userInfo);
 	getUserInfoToRoomList();
 }
 

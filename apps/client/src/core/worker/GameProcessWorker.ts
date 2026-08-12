@@ -429,6 +429,12 @@ async function handleMessage(data: WorkerCommMsg) {
 				gameProcess && gameProcess.handlePlayerReconnect(userId);
 			}
 			break;
+		case WorkerCommType.SpectatorJoin:
+			{
+				const { userId } = data.data;
+				gameProcess && gameProcess.handleSpectatorJoin(userId);
+			}
+			break;
 		case WorkerCommType.RequestSnapshot:
 			{
 				if (gameProcess) {
@@ -4188,11 +4194,25 @@ export class GameProcess implements IGameProcess {
 		this.playerButtons.delete(playerId);
 	}
 
+	/**
+	 * 丢弃玩家当前挂起的重连初始化会话。
+	 * 会话是「一次重连握手」的凭证，晚到的旧会话定时器必须在这里清掉：
+	 * 否则它会在 60s 后无条件把已经回来的玩家踢回房间并重新交给 AI。
+	 */
+	private clearReconnectInitSession(userId: string): void {
+		const session = this.reconnectInitSessions.get(userId);
+		if (!session) return;
+		clearTimeout(session.timeout);
+		this.reconnectInitSessions.delete(userId);
+	}
+
 	public handlePlayerOffline(userId: string) {
 		if (this.initialInitBarrier.get(userId) === "pending") {
 			this.initialInitBarrier.set(userId, "offline-ai");
 			this.resolveInitialBarrierIfComplete();
 		}
+		// 掉线即作废未完成的重连握手，避免旧定时器影响下一次重连
+		this.clearReconnectInitSession(userId);
 		const player = this.getPlayerById(userId);
 		if (player) {
 			// 清理玩家的所有按钮
@@ -4217,6 +4237,9 @@ export class GameProcess implements IGameProcess {
 			this.aiDynamicButtonInFlight.delete(userId);
 			this.aiDynamicButtonSchedulingSuppressed.delete(userId);
 			this.invalidateAIPreRollOperationSession(userId);
+			// 同一个玩家可能连着触发多次重连（重连管理器每 3s 重试一次，地图分块传输比这久）。
+			// 不清掉上一次的会话，旧定时器会在这一次握手成功之后才到点，把人重新打成离线 + AI。
+			this.clearReconnectInitSession(userId);
 			player.setIsOffline(false);
 			// 取消AI托管
 			player.isAI = false;
@@ -4229,6 +4252,8 @@ export class GameProcess implements IGameProcess {
 
 			const initSessionId = randomString(16);
 			const timeout = setTimeout(() => {
+				// 只有自己仍是当前会话时才判超时，防止被后来的握手顶掉后还去动玩家状态
+				if (this.reconnectInitSessions.get(userId)?.sessionId !== initSessionId) return;
 				this.reconnectInitSessions.delete(userId);
 				this.sendToPlayer(userId, { type: SocketMsgType.GameInitAborted, source: SocketMsgSource.Server, data: { initSessionId, reason: "重连初始化超时" } });
 				this.handlePlayerOffline(userId);
@@ -4244,6 +4269,28 @@ export class GameProcess implements IGameProcess {
 		} else {
 			console.log("奇怪的玩家 in game");
 		}
+	}
+
+	/**
+	 * 开局后中途加入的旁观者：不是玩家，不进初始化屏障，也不需要回 GameInitFinished。
+	 * 只推一份当前快照让他能把棋盘画出来，后续走 Room 的旁观镜像收广播。
+	 */
+	public handleSpectatorJoin(userId: string) {
+		sendToUsers([userId], {
+			type: SocketMsgType.GameStart,
+			source: SocketMsgSource.Server,
+			data: undefined,
+		});
+		sendToUsers([userId], {
+			type: SocketMsgType.GameInit,
+			source: SocketMsgSource.Server,
+			data: this.getGameData(),
+		});
+		sendToUsers([userId], {
+			type: SocketMsgType.GameInitFinished,
+			source: SocketMsgSource.Server,
+			data: undefined,
+		});
 	}
 
 	public createSnapshot(): SaveSnapshot {

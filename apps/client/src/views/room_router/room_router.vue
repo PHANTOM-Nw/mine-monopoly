@@ -15,6 +15,7 @@ import { throttle } from "@src/utils";
 import { useResourceStore } from "@src/store/game";
 import FpErrorBoundary from "@src/components/utils/fp-error-boundary/index.vue";
 import HeroTitle from "@src/components/hero-title";
+import { clearGuestIdentity, loadGuestIdentity } from "@src/utils/auth/guest";
 import gsap from "gsap";
 
 const userInfoStore = useUserInfo();
@@ -87,19 +88,13 @@ onMounted(async () => {
 				return;
 			}
 		}
-		let userInfo = localStorage.getItem("user") || "";
-		if (userInfo) {
-			//游客登录
-			try {
-				const { userId, useraccount = "", username, avatar = "", color } = JSON.parse(userInfo);
-				const userInfoStore = useUserInfo();
-				userInfoStore.$patch({ userId, useraccount, username, avatar, color });
-				useLoading().hideLoading();
-				return;
-			} catch (e: any) {
-				FPMessage({ type: "error", message: "读取用户信息失败, 请重新进行游客登记" });
-				handleLogout();
-			}
+		//游客登录：localStorage 没有时会回退到 cookie
+		const guest = loadGuestIdentity();
+		if (guest) {
+			const userInfoStore = useUserInfo();
+			userInfoStore.$patch(guest);
+			useLoading().hideLoading();
+			return;
 		}
 		handleLogout();
 	}
@@ -107,7 +102,7 @@ onMounted(async () => {
 
 function handleLogout() {
 	localStorage.removeItem("token");
-	localStorage.removeItem("user");
+	clearGuestIdentity();
 	router.replace({ name: "login" });
 }
 

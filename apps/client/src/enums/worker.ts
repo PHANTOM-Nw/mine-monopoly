@@ -16,6 +16,7 @@ export enum WorkerCommType {
 	EmitOperation,
 	UserOffLine,
 	UserReconnect,
+	SpectatorJoin,
 	UpdateAIDecisionConfig,
 	ClearAIStrategyMemory,
 	AIDecisionResponse,

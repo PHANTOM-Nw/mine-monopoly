@@ -340,10 +340,9 @@ const handleChangeMapInternal: ServerMessageHandler<SocketMsgType.ChangeMap> = a
 		}
 		useRoomInfo().roleList = tempRoleList;
 		useRoomInfo().gameSettingForm = gameMap.gameSettingForm;
-		// 初始随机选择一个角色
-		if (roles.length > 0 && !useRoomInfo().amISpectator) {
-			useMonopolyClient().changeRole(roles[Math.floor(Math.random() * roles.length)].id);
-		}
+		// 这里不再自动随机选角色：这段代码每次收到地图都会跑，
+		// 断线重连和房主换地图时会把已经选好的角色悄悄改掉，两个人还可能撞到同一个。
+		// 角色一律留空，由玩家自己在房间页点「选择角色」，房主开局前会做校验。
 		// 如果自己是房主,提交默认游戏设置(房间类里不解析游戏数据, 只能靠房主来传)
 		if (useRoomInfo().amIRoomOwner) {
 			client.randomizeAIRoles();
