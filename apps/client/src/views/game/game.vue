@@ -345,6 +345,11 @@
 			position: absolute;
 			right: 0.8rem;
 			top: 0.6rem;
+			// 必须显式给层级：.ui-container 是 z-index:auto，不创建层叠上下文，
+			// 里面的东西是提升到 .game-page 里和 #game-canvas(--z-game:10) 一起排序的。
+			// 玩家卡片、按钮面板、自定义 UI 都带了 --z-ui:20，只有这条工具栏漏了，
+			// 结果一直被画布盖着 —— 按钮其实一直在，只是看不见也点不到。
+			z-index: var(--z-ui);
 			display: flex;
 			flex-direction: row;
 			gap: 0.5rem;
