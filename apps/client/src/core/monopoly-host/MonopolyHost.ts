@@ -123,19 +123,19 @@ export class MonopolyHost {
 							reset: resetHeartbeatTimeout,
 						});
 					} else {
-						conn.send(
-							JSON.stringify(<SocketMessage>{
-								type: SocketMsgType.MsgNotify,
-								data: "",
-								msg: {
-									type: "error",
-									content: "该房间已经开始游戏了!",
-								},
-								source: "server",
-							}),
-						);
-						conn.close();
-						return;
+						// 开局后进来的新用户按旁观处理：不占座、不进游戏进程，只收广播
+						clientUserId = user.userId;
+						connectionVersion = (_this.connectionVersionMap.get(user.userId) || 0) + 1;
+						_this.connectionVersionMap.set(user.userId, connectionVersion);
+
+						_this.clientList.set(user.userId, conn);
+						void this.room.joinAsSpectator(user, conn);
+						isOnline = true;
+						resetHeartbeatTimeout();
+						_this.clientHeartCheckFns.set(clientUserId, {
+							clear: clearHeartbeatTimeout,
+							reset: resetHeartbeatTimeout,
+						});
 					}
 				} else {
 					// 与添加 AI 共用座位口径：旁观房主不占座、AI 占座

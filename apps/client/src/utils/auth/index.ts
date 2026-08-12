@@ -1,6 +1,7 @@
 import router from "@src/router";
 import { useUserInfo, useRoomInfo } from "@src/store";
 import { destoryMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
+import { clearGuestIdentity } from "./guest";
 
 function safeLocalStorageGet(key: string): string | null {
 	try {
@@ -33,7 +34,8 @@ export function clearAuthAndRedirect() {
   // 清除 localStorage
   safeLocalStorageRemove("token");
   safeLocalStorageRemove("refreshToken");
-  safeLocalStorageRemove("user");
+  // 游客身份在 localStorage 和 cookie 各有一份，得一起清，否则下次又被 cookie 复活
+  clearGuestIdentity();
 
   // 清除 Pinia store 状态
   const userInfoStore = useUserInfo();

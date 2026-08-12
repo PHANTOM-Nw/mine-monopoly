@@ -155,12 +155,14 @@ import { vStagger } from "@src/directives";
 		gameSettingFormVisible.value = false;
 	}
 
+	// 注意语义是「不能开始」，直接绑到按钮的 disabled 上。
+	// 角色不再自动随机分配，所以每个参与者都必须自己选过；房主同样要选。
 	const canStart = computed(
 		() =>
 			!(
 				Boolean(roomInfoStore.mapInfo) &&
-				roomInfoStore.userList.every(
-					(user) => Boolean(user.roleId) || Boolean(user.isAI) || user.userId === ownerId.value || user.isReady,
+				playerList.value.every(
+					(user) => Boolean(user.roleId) && (Boolean(user.isAI) || user.userId === ownerId.value || user.isReady),
 				) &&
 				!useLoading().loading
 			),
@@ -448,7 +450,13 @@ import { vStagger } from "@src/directives";
 					<span v-for="user in spectatorList" :key="user.userId" class="spectator-user">
 						{{ user.username }}
 					</span>
-					<button v-if="amISpectator" type="button" class="spectator-exit-button btn-small" @click="handleToggleSpectatorMode">
+					<!-- 只有房主的旁观模式是可切换的；中途进来观战的人只能退出房间 -->
+					<button
+						v-if="amISpectator && isOwner"
+						type="button"
+						class="spectator-exit-button btn-small"
+						@click="handleToggleSpectatorMode"
+					>
 						退出旁观
 					</button>
 				</div>
@@ -692,9 +700,11 @@ import { vStagger } from "@src/directives";
 			flex: 1;
 			display: grid;
 			// 列数由房间人数上限决定，行数交给 grid 自动铺开；
-			// 行高留出下限，人数多到放不下时容器滚动而不是把卡片压扁
+			// 行高留出下限，人数多到放不下时容器滚动而不是把卡片压扁。
+			// 下限要够装下卡片里那几层固定高度的浮层（名字条 2.5rem + 徽章 + 底部标签 2.8rem），
+			// 否则它们会互相叠上去。
 			grid-template-columns: repeat(var(--seat-columns, 3), 1fr);
-			grid-auto-rows: minmax(8rem, 1fr);
+			grid-auto-rows: minmax(9.5rem, 1fr);
 			row-gap: 0.5rem;
 			column-gap: 0.5rem;
 			overflow-y: auto;

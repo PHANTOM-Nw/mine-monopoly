@@ -336,7 +336,10 @@ $top-bar-height: 2.8rem;
 		z-index: 101;
 		padding: 0.4rem;
 		display: flex;
-		flex-direction: column;
+		// 竖着排会一路顶到底部的「准备」标签上；限高后按钮多了就往左边另起一列
+		flex-flow: column wrap;
+		align-content: flex-end;
+		max-height: calc(100% - #{$top-bar-height} - 3.4rem);
 		gap: 0.4rem;
 
 		& > :deep(.fp-popover) {
@@ -433,13 +436,20 @@ $top-bar-height: 2.8rem;
 		@include felt-patch(#f7c336);
 		user-select: none;
 		position: absolute;
-		bottom: 5%;
-		width: 85%;
+		// 卡片是 flex 容器，绝对定位子元素不给 left/right 时要靠 flex 的静态位置来摆，
+		// 卡片一旦变窄变矮就会看起来偏掉。这里把左右锚死，宽度由 inset 推出来。
+		left: 7.5%;
+		right: 7.5%;
+		bottom: 0.4rem;
+		width: auto;
 		font-size: 1.3rem;
 		height: 2.8rem;
 		line-height: 2.8rem;
 		color: #ffffff;
 		text-align: center;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		z-index: 100;
 		box-shadow: var(--fp-shadow-depth);
 		padding: 0;
@@ -470,10 +480,15 @@ $top-bar-height: 2.8rem;
 	& > .status-badges {
 		position: absolute;
 		display: flex;
-		flex-direction: column;
+		// 竖排会往下顶到「准备」标签上：房主 + AI 两个徽章就够把矮卡片撑穿。
+		// 改成横排换行，高度只跟卡片宽度有关，不会再和底部标签打架。
+		flex-direction: row;
+		flex-wrap: wrap;
 		align-items: flex-start;
-		gap: 0.45rem;
+		gap: 0.35rem;
 		inset-inline-start: 0.8rem;
+		// 右边留出 .right-side 那一列按钮的宽度，别叠上去
+		inset-inline-end: 3.8rem;
 		inset-block-start: calc($top-bar-height + 0.4rem);
 		z-index: 101;
 
@@ -561,14 +576,18 @@ $top-bar-height: 2.8rem;
 
 		& > .info {
 			@include felt-patch(#ffedb7);
-			width: 90%;
+			// 原来是 width: 90% + right: 0，头像（左侧 3rem）会压在名字条上；
+			// 卡片越窄压得越多，名字看起来就是偏的。改成从头像右边起算。
+			left: calc($avatar-size - 0.3rem);
+			right: 0;
+			width: auto;
 			height: 2.5rem;
 			text-align: center;
 			position: absolute;
-			right: 0;
 			display: flex;
 			justify-content: center;
 			align-items: center;
+			overflow: hidden;
 			z-index: 19;
 
 			&:before {
@@ -579,10 +598,15 @@ $top-bar-height: 2.8rem;
 			}
 
 			& > .username {
+				max-width: 100%;
+				padding: 0 0.4rem;
 				line-height: 2.4rem;
 				color: #ffffff;
 				font-size: 1.1rem;
 				text-shadow: var(--fp-text-shadow);
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
 			}
 		}
 	}

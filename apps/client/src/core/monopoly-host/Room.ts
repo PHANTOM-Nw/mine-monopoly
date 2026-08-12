@@ -78,6 +78,10 @@ export class Room {
 	private aiUserList: Map<string, UserInRoomInfo>;
 	private ownerId: string = "";
 	private ownerSpectatorMode: boolean;
+	/** 开局后中途进来的旁观者：占 userList（要收广播）但不占座、不进游戏进程 */
+	private lateSpectators: Set<string> = new Set();
+	/** 每个用户最近一次重连握手的连接版本号，用来丢弃被顶掉的旧握手 */
+	private reconnectVersions: Map<string, number> = new Map();
 	/** 房间人数上限，由房主设置，含 AI 玩家、不含旁观者 */
 	private maxPlayers: number;
 	private gameSetting: GameSetting;
@@ -312,7 +316,87 @@ export class Room {
 	}
 
 	private isSpectatorUser(userId: string): boolean {
+		if (this.lateSpectators.has(userId)) return true;
 		return userId === this.ownerId && this.ownerSpectatorMode;
+	}
+
+	/** 需要收到游戏消息镜像的旁观者（旁观房主 + 中途进来的旁观者） */
+	private getSpectatorUserIds(): string[] {
+		const ids = new Set<string>(this.lateSpectators);
+		if (this.ownerSpectatorMode && this.ownerId) ids.add(this.ownerId);
+		return Array.from(ids);
+	}
+
+	/**
+	 * 游戏已经开局后，让一个不在房间里的用户以旁观者身份进来。
+	 * 旁观者进 userList（这样广播、聊天、房间信息都自动覆盖到），
+	 * 但被 isSpectatorUser 排除在座位口径与游戏参与者之外，不会进 Worker 的 players。
+	 */
+	public async joinAsSpectator(user: User, conn: DataConnection): Promise<boolean> {
+		if (this.userList.has(user.userId)) return false;
+		if (!this.mapInfo) return false;
+
+		const userInRoom: UserInRoom = {
+			...user,
+			socketClient: conn,
+			isOffLine: false,
+			roleId: "",
+			isReady: true,
+		};
+		this.lateSpectators.add(user.userId);
+		this.userList.set(user.userId, userInRoom);
+
+		this.sendToClient(
+			conn,
+			SocketMsgType.JoinRoom,
+			{ roomId: this.roomId },
+			{ type: "success", content: "本局已经开始，你将以旁观者身份观战" },
+			this.roomId,
+		);
+		this.roomBroadcast({
+			type: SocketMsgType.MsgNotify,
+			source: SocketMsgSource.Server,
+			data: undefined,
+			msg: { type: "info", content: `${userInRoom.username}进来观战了` },
+		});
+		// 必须先播房间信息：客户端靠 RoomInfo 里的 isSpectator 决定进游戏页后是否发初始化确认
+		this.roomInfoBroadcast();
+
+		this.startMapChunkTransfer(user.userId, this.mapInfo);
+		try {
+			await Promise.race([
+				this.operationListener.onceAsync(user.userId, OperateType.MapResourceLoaded),
+				new Promise((_, reject) => setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT)),
+			]);
+		} catch {
+			this.removeSpectator(user.userId, "地图加载失败，无法观战");
+			return false;
+		}
+
+		// 期间可能已经离开或游戏已经结束
+		if (!this.lateSpectators.has(user.userId)) return false;
+		if (!this.gameProcessWorker) {
+			// 游戏在传输过程中结束了，留在房间页即可
+			this.roomInfoBroadcast();
+			return true;
+		}
+
+		this.gameProcessWorker.postMessage(<WorkerCommMsg>{
+			type: WorkerCommType.SpectatorJoin,
+			data: { userId: user.userId },
+		});
+		return true;
+	}
+
+	private removeSpectator(userId: string, reason?: string): void {
+		if (!this.lateSpectators.delete(userId)) return;
+		const user = this.userList.get(userId);
+		this.userList.delete(userId);
+		this.clearTransferState(userId);
+		if (user && reason) {
+			this.sendToClient(user.socketClient, SocketMsgType.LeaveRoom, undefined, { type: "warning", content: reason });
+		}
+		this.roomInfoBroadcast();
 	}
 
 	private getNextAiColor(): string {
@@ -397,7 +481,8 @@ export class Room {
 
 	private ensureAiPlayersReadyForStart(): { success: boolean; error?: string } {
 		const invalidAiUser = Array.from(this.aiUserList.values()).find((user) => {
-			if (user.roleId) return false;
+			// 换地图后 AI 身上可能留着上一张地图的角色 ID，得按「当前地图是否认得」来判
+			if (this.isValidRoleId(user.roleId)) return false;
 			return !this.assignRandomRoleToAiUser(user);
 		});
 		if (invalidAiUser) {
@@ -709,11 +794,25 @@ export class Room {
 	public readyToggle(_user: UserInRoomInfo | string) {
 		const user = this.userList.get(typeof _user === "string" ? _user : _user.userId);
 		if (user) {
+			// 没选角色不让准备：initPlayers 拿不到角色会直接抛错，把整个 Worker 打进安全模式
+			if (!user.isReady && !this.isValidRoleId(user.roleId)) {
+				this.sendToClient(user.socketClient, SocketMsgType.MsgNotify, undefined, {
+					type: "warning",
+					content: "先选个角色再准备吧",
+				});
+				return false;
+			}
 			user.isReady = !user.isReady;
 			this.roomInfoBroadcast();
 			return user.isReady;
 		}
 		return false;
+	}
+
+	/** 角色 ID 是否属于当前地图。换地图后旧角色 ID 会失效，必须重选 */
+	private isValidRoleId(roleId: string | undefined): boolean {
+		if (!roleId) return false;
+		return useMapData().roles.some((role) => role.id === roleId);
 	}
 
 	/**
@@ -814,6 +913,14 @@ export class Room {
 		const user = this.userList.get(userId);
 		if (!user) return false;
 		this.sendToClient(user.socketClient, SocketMsgType.LeaveRoom, undefined);
+		// 中途进来的旁观者不是玩家，走了就直接摘掉，不能按断线处理（会把不存在的玩家交给 AI）
+		if (this.lateSpectators.has(userId)) {
+			this.lateSpectators.delete(userId);
+			this.userList.delete(userId);
+			this.clearTransferState(userId);
+			this.roomInfoBroadcast();
+			return Array.from(this.userList.values()).every((u) => u.isOffLine);
+		}
 		//房间中还有更多玩家的情况
 		if (this.isStarted) {
 			//游戏已经开始，处理断线
@@ -860,9 +967,19 @@ export class Room {
 		this.roomInfoBroadcast();
 	}
 
+	/**
+	 * 重连握手是异步的（要走完整张地图的分块传输），期间同一个玩家完全可能再次重连。
+	 * 用 MonopolyHost 递增的连接版本号做门票：只有最新一次握手有权改玩家状态，
+	 * 被顶掉的旧握手必须安静退出——否则它超时后会把正连着的玩家重新标记为离线并交给 AI。
+	 */
+	private isLatestReconnect(userId: string, connectionVersion: number): boolean {
+		return this.reconnectVersions.get(userId) === connectionVersion;
+	}
+
 	public async handleUserReconnect(userId: string, newCoon: DataConnection, connectionVersion: number) {
 		const oldUser = this.userList.get(userId);
 		if (oldUser && this.mapInfo) {
+			this.reconnectVersions.set(userId, connectionVersion);
 			oldUser.socketClient = newCoon;
 			this.roomInfoBroadcast();
 
@@ -876,6 +993,7 @@ export class Room {
 					new Promise((_, reject) => setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT)),
 				]);
 			} catch (error) {
+				if (!this.isLatestReconnect(userId, connectionVersion)) return;
 				this.sendToClient(newCoon, SocketMsgType.GameInitAborted, {
 					initSessionId: randomUUID(),
 					reason: error instanceof Error ? error.message : "地图资源加载失败",
@@ -884,9 +1002,12 @@ export class Room {
 				return;
 			}
 
+			if (!this.isLatestReconnect(userId, connectionVersion)) return;
+
 			if (this.gameProcessWorker) {
+				// 旁观者不在 Worker 的 players 里，走玩家重连那条路会被当成「奇怪的玩家」直接丢掉
 				this.gameProcessWorker.postMessage(<WorkerCommMsg>{
-					type: WorkerCommType.UserReconnect,
+					type: this.lateSpectators.has(userId) ? WorkerCommType.SpectatorJoin : WorkerCommType.UserReconnect,
 					data: { userId: oldUser.userId },
 				});
 			}
@@ -978,7 +1099,12 @@ export class Room {
 		}
 
 		function sendChangeMapMessage() {
-			_this.userList.forEach((u) => (u.isReady = false));
+			// 换地图后旧角色 ID 在新地图上不存在，必须一起清掉让大家重选，
+			// 否则开局时 initPlayers 找不到角色会抛错
+			_this.userList.forEach((u) => {
+				u.isReady = false;
+				u.roleId = "";
+			});
 			// 使用分块传输发送给所有玩家（含房主，避免单条大消息被不可靠信道丢弃）
 			for (const [userId, user] of _this.userList) {
 				_this.startMapChunkTransfer(userId, data);
@@ -1005,6 +1131,8 @@ export class Room {
 	}
 
 	public changeRole(_userId: string, roleId: string): void {
+		// 只接受当前地图里存在的角色，脏值留到开局会让 Worker 抛错
+		if (!this.isValidRoleId(roleId)) return;
 		const user = this.userList.get(_userId);
 		if (user) {
 			user.roleId = roleId;
@@ -1184,6 +1312,22 @@ export class Room {
 			});
 			return;
 		}
+		// 角色不再自动随机分配，开局前必须确认人人都选了 —— 房主也不例外，
+		// 上面那条「未准备」的检查是放过房主的，这里不补就会在 initPlayers 抛错进安全模式
+		const roleless = this.getGameParticipants().filter((item) => !this.isValidRoleId(item.roleId));
+		if (roleless.length > 0) {
+			this.roomBroadcast({
+				type: SocketMsgType.MsgNotify,
+				source: SocketMsgSource.Server,
+				data: undefined,
+				msg: {
+					type: "warning",
+					content: `${roleless.map((item) => item.username).join("、")} 还没选角色`,
+				},
+			});
+			this.roomInfoBroadcast();
+			return;
+		}
 		if (this.isStarted || this.gameProcessWorker) return;
 		clearAIRemoteUsageStats();
 		this.roomBroadcast({
@@ -1245,6 +1389,11 @@ export class Room {
 	}
 	private async handleGameOver() {
 		await setRoomStarted(this.getRoomId(), false);
+		// 本局结束，中途观战的人恢复成普通成员，否则他们会永远卡在旁观状态、进不了下一局
+		if (this.lateSpectators.size > 0) {
+			this.lateSpectators.clear();
+			this.maxPlayers = clampRoomPlayerLimit(Math.max(this.maxPlayers, this.getSeatCount()));
+		}
 		Array.from(this.userList.values()).forEach((u) => {
 			u.isReady = false;
 		});
@@ -2612,7 +2761,7 @@ export class Room {
 	/**
 	 * 内部处理发送消息给用户
 	 */
-	private shouldMirrorToOwnerSpectator(msg: ServerSocketMessage): boolean {
+	private shouldMirrorToSpectator(msg: ServerSocketMessage): boolean {
 		if (msg.msg) {
 			return true;
 		}
@@ -2656,14 +2805,13 @@ export class Room {
 			}
 		}
 
-		if (
-			this.ownerSpectatorMode &&
-			this.shouldMirrorToOwnerSpectator(data.data) &&
-			!data.userIdList.includes(this.ownerId)
-		) {
-			const owner = this.userList.get(this.ownerId);
-			if (owner) {
-				this.sendToClient(owner.socketClient, data.data.type, data.data.data, data.data.msg, data.data.extra);
+		// 旁观者不在玩家名单里，游戏进程的定向消息不会带上他们，这里补一份镜像
+		if (!this.shouldMirrorToSpectator(data.data)) return;
+		for (const spectatorId of this.getSpectatorUserIds()) {
+			if (data.userIdList.includes(spectatorId)) continue;
+			const spectator = this.userList.get(spectatorId);
+			if (spectator) {
+				this.sendToClient(spectator.socketClient, data.data.type, data.data.data, data.data.msg, data.data.extra);
 			}
 		}
 	}

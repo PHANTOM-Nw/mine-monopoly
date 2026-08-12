@@ -254,12 +254,16 @@
 				<PlayerContainer />
 
 				<div class="tool-bar ui-item">
-					<button class="border-button lock-camera" @click="handleToggleLockCamera">
+					<button
+						class="border-button lock-camera"
+						:title="islockingCamera ? '解除相机锁定' : '锁定相机跟随'"
+						@click="handleToggleLockCamera"
+					>
 						<FontAwesomeIcon :icon="lockCameraIcon" />
 					</button>
 					<button
 						class="border-button lock-camera"
-						:title="isOverview ? '回到跟随视角' : '全局俯视'"
+						:title="isOverview ? '回到跟随视角' : '全局俯视（整盘居中）'"
 						@click="handleToggleOverview"
 					>
 						<FontAwesomeIcon :icon="overviewIcon" />
@@ -304,9 +308,10 @@
 
 	&.lock-camera {
 		border-width: 0.25rem;
-		font-size: 1.2em;
-		width: 4rem;
-		height: 4rem;
+		font-size: 1.1em;
+		// 3rem：工具栏挪到右上角后要塞进玩家卡片列表（top: 4.2rem）上方那条带子里
+		width: 3rem;
+		height: 3rem;
 	}
 }
 
@@ -333,14 +338,15 @@
 	.ui-item {
 		position: absolute;
 
-		// 原本是 display:none，锁定视角按钮从来没显示过。
-		// 放左上角：右上是玩家卡片(top:4.2rem)、上中是回合信息、下方是卡牌和按钮面板，只有这里是空的。
+		// 右上角、玩家卡片列表(top:4.2rem)正上方那条带子：
+		// 0.6rem 上边距 + 3rem 按钮 = 3.6rem，刚好不压到卡片。
+		// 横排是因为这里高度只有 4.2rem，竖排放不下第二个。
 		&.tool-bar {
 			position: absolute;
-			left: 0.8rem;
-			top: 0.8rem;
+			right: 0.8rem;
+			top: 0.6rem;
 			display: flex;
-			flex-direction: column;
+			flex-direction: row;
 			gap: 0.5rem;
 			pointer-events: none;
 		}

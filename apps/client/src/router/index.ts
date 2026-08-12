@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory, createWebHistory } from "vue-router";
 import { useLoading, useRoomInfo, useUserInfo } from "@src/store";
 import { destoryMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
+import { hasGuestIdentity } from "@src/utils/auth/guest";
 
 function componentLoadedInterceptor(loader: () => Promise<any>) {
 	return async () => {
@@ -51,7 +52,9 @@ router.beforeEach((to, form) => {
 			if (
 				// 检查用户是否已登录
 				!localStorage.getItem("token") &&
-				!localStorage.getItem("user") &&
+				// 游客身份要走统一入口：localStorage 被清但 cookie 还在时也算已登录，
+				// 直接读 localStorage 会把能恢复的人误踢回登录页
+				!hasGuestIdentity() &&
 				//  避免无限重定向
 				to.name !== "login"
 			) {
