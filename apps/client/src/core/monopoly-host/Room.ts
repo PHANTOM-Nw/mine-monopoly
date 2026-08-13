@@ -2703,6 +2703,8 @@ export class Room {
 				setting: this.gameSetting,
 				mapInfo: mapData,
 				userList: this.getGameParticipants(),
+				// 开局就在场的旁观者（旁观房主）也要进初始化屏障，否则全 AI 局会在他还没画好棋盘时就开跑
+				spectatorIdList: this.getSpectatorUserIds(),
 				roomOwnerId: this.ownerId,
 				aiConfig: this.aiDecisionConfig,
 				saveData: this.pendingSaveData ?? undefined,
@@ -2788,6 +2790,9 @@ export class Room {
 			case SocketMsgType.ButtonRegister:
 			case SocketMsgType.ButtonStateChanged:
 			case SocketMsgType.ButtonRemove:
+			// 地块上的事件图标（会游走的 COVID、阳🐷 之类）只能靠这条增量更新，
+			// 不镜像的话旁观者的棋盘图标会一直停在地图文件的初始状态
+			case SocketMsgType.MapEventChanged:
 				return true;
 			default:
 				return false;

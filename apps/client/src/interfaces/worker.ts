@@ -119,6 +119,8 @@ interface WorkerCommDataTypeMap {
 		setting: GameSetting;
 		mapInfo: GameMap;
 		userList: UserInRoomInfo[];
+		/** 开局时在场的旁观者，他们不是玩家但同样要等初始化完成 */
+		spectatorIdList?: string[];
 		roomOwnerId: string;
 		aiConfig: AIDecisionConfig;
 		saveData?: { snapshot: SaveSnapshot; aiPlayerIds: string[] };

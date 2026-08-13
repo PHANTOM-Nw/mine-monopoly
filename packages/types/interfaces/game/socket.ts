@@ -1032,6 +1032,9 @@ export interface PlayerOperationResult {
 	/** 动态按钮点击 */
 	[OperateType.DynamicButtonClick]: DynamicButtonClickOperationResult;
 
+	/** 玩家自己开关 AI 托管 */
+	[OperateType.ToggleAIControl]: { enabled: boolean };
+
 	/** 安全模式重试 */
 
 	/** 安全模式放弃游戏 */

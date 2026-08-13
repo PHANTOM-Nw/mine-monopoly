@@ -379,9 +379,18 @@ export class Player implements IPlayer {
 		await this.commandBus.execute({ type: "player.tp", payload: { positionIndex, viaMapItemIds } });
 	}
 
-	public async rollDices(): Promise<DiceResult[]> {
-		return (await this.commandBus.execute({ type: "player.dice.roll", payload: { dices: clone(this.dices) } }))
-			.diceResult;
+	/**
+	 * 掷骰子。
+	 * @param count 只掷前 count 颗（不传就是手上全部）。客户端的投掷动画是按结果数组长度渲染的，
+	 *              所以想「只投一颗」就必须真的只传一颗进来，光取结果里的第一个是骗不过画面的。
+	 */
+	public async rollDices(count?: number): Promise<DiceResult[]> {
+		const all = clone(this.dices);
+		const dices =
+			typeof count === "number" && Number.isFinite(count)
+				? all.slice(0, Math.max(0, Math.floor(count)))
+				: all;
+		return (await this.commandBus.execute({ type: "player.dice.roll", payload: { dices } })).diceResult;
 	}
 
 	public async addDice(diceValue?: number[]) {

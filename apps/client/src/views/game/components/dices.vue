@@ -9,8 +9,9 @@ const utilStore = useUtil();
 const gameDataStore = useGameData();
 
 // 状态获取
-const canRoll = computed(() => utilStore.canRoll);
 const playerData = computed(() => gameDataStore.myGameInfo);
+// 托管期间骰子由 AI 掷，本人点了不算
+const canRoll = computed(() => utilStore.canRoll && !playerData.value?.isAI);
 
 const emit = defineEmits(["roll"]);
 

@@ -564,7 +564,7 @@ const handleRollDiceResult: ServerMessageHandler<SocketMsgType.RollDiceResult> =
 	utilStore.endAnimation();
 };
 
-const handleUsedChanceCard: ServerMessageHandler<SocketMsgType.UseChanceCard> = (msg) => {
+const handleUsedChanceCard: ServerMessageHandler<SocketMsgType.UseChanceCard> = (msg, client) => {
 	if (!msg.data) return;
 	const { error, animationId, chanceCard, sourcePlayerId, targetIdList } = msg.data;
 	const utilStore = useUtil();
@@ -577,6 +577,7 @@ const handleUsedChanceCard: ServerMessageHandler<SocketMsgType.UseChanceCard> = 
 	// 使用成功，保持动画状态（客户端已经调用过 startAnimation）
 	// 如果有动画信息，触发机会卡使用事件
 	if (animationId && chanceCard && sourcePlayerId && targetIdList) {
+		if (ackAnimationIfNoRenderer("chance-card-use", animationId, client)) return;
 		useEventBus().emit("chance-card-use", {
 			animationId,
 			chanceCard,
@@ -586,15 +587,29 @@ const handleUsedChanceCard: ServerMessageHandler<SocketMsgType.UseChanceCard> = 
 	}
 };
 
-const handlePlayerWalk: ServerMessageHandler<SocketMsgType.PlayerWalk> = (msg) => {
+/**
+ * 渲染器还没挂上监听（旁观者进场时游戏已经在跑、场景重载中）时，动画广播会掉在地上，
+ * 回执自然也发不出去，游戏进程只能一路空等超时 —— 这是旁观视角「延迟很大」的主因。
+ * 这种情况下立刻补一条回执，位置由 GameData 回正兜底。
+ */
+const ackAnimationIfNoRenderer = (eventName: string, animationId: string, client: MonopolyClient): boolean => {
+	if (useEventBus().getListeners(eventName) > 0) return false;
+	console.warn(`[动画] 渲染器未就绪，直接回执 ${eventName}:`, animationId);
+	client.AnimationComplete(animationId);
+	return true;
+};
+
+const handlePlayerWalk: ServerMessageHandler<SocketMsgType.PlayerWalk> = (msg, client) => {
 	if (!msg.data) return;
 	const { playerId, step, walkId, totalSteps, startStep } = msg.data;
+	if (ackAnimationIfNoRenderer("player-walk", walkId, client)) return;
 	useEventBus().emit("player-walk", playerId, step, walkId, totalSteps, startStep);
 };
 
-const handlePlayerTp: ServerMessageHandler<SocketMsgType.PlayerTp> = (msg) => {
+const handlePlayerTp: ServerMessageHandler<SocketMsgType.PlayerTp> = (msg, client) => {
 	if (!msg.data) return;
 	const { playerId, positionIndex, walkId, viaMapItemIds } = msg.data;
+	if (ackAnimationIfNoRenderer("player-tp", walkId, client)) return;
 	useEventBus().emit("player-tp", playerId, positionIndex, walkId, viaMapItemIds);
 };
 
