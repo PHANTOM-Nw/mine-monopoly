@@ -173,9 +173,12 @@ export interface IPlayer {
 
 	/**
 	 * 掷骰子
+	 * @param count - 只掷前 count 颗，不传则掷手上全部。
+	 *   客户端的投掷动画按结果数组长度渲染，想「只投一颗」就得传 1，
+	 *   否则画面上照样是两颗骰子飞出来。
 	 * @returns 骰子结果数组
 	 */
-	rollDices: () => Promise<DiceResult[]>;
+	rollDices: (count?: number) => Promise<DiceResult[]>;
 
 	/**
 	 * 添加骰子
