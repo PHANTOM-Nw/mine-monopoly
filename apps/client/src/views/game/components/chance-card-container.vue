@@ -29,10 +29,12 @@ const getIconUrl = (card: ChanceCardClientInfo) => {
 	return resource ? resource.url : "";
 };
 
-const _canUseChanceCard = computed(() => utilStore.canUseCard);
+// 托管期间由 AI 出牌，本人的点击一律不接，免得两边同时出手
+const _isAutoPlay = computed(() => Boolean(gameInfoStore.myGameInfo?.isAI));
+const _canUseChanceCard = computed(() => utilStore.canUseCard && !_isAutoPlay.value);
 
 async function handleChanceCardClick(card: ChanceCardClientInfo) {
-	if (!utilStore.canUseCard) return;
+	if (!_canUseChanceCard.value) return;
 	showTargetSelector(card.type, {
 		title: `使用机会卡: “${card.name}”`,
 		confirmText: "使用",
@@ -52,7 +54,7 @@ async function handleChanceCardClick(card: ChanceCardClientInfo) {
 
 <template>
 	<div class="chance-card-container" :style="{ '--num': _chanceCardsList.length }">
-		<div v-show="utilStore.canUseCard" class="tips">点击卡片使用机会卡，一回合使用一张</div>
+		<div v-show="_canUseChanceCard" class="tips">点击卡片使用机会卡，一回合使用一张</div>
 		<TransitionGroup name="card">
 			<ChanceCard
 				@click="handleChanceCardClick(card)"

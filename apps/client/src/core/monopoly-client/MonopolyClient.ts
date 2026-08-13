@@ -238,6 +238,18 @@ export class MonopolyClient {
 		});
 	}
 
+	/** 开关 AI 托管：开启后本人的操作全部交给房主配置的那套 AI */
+	public setAIControl(enabled: boolean) {
+		this.sendMsg({
+			type: SocketMsgType.Operation,
+			source: SocketMsgSource.Client,
+			data: {
+				operateType: OperateType.ToggleAIControl,
+				data: { enabled },
+			},
+		});
+	}
+
 	public sendDynamicButtonClick(buttonId: string) {
 		this.sendMsg({
 			type: SocketMsgType.Operation,

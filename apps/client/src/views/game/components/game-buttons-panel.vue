@@ -4,8 +4,11 @@
 		<div v-if="spectatorMode" class="panel-message">{{ spectatorMessage }}</div>
 		<div class="panel-content" v-show="!spectatorMode">
 			<DynamicButtonContainer :player-id="playerId" layout="vertical" />
-			<Dices @click="$emit('rollDice')"></Dices>
+			<!-- 接 roll 而不是原生 click：Dices 内部按 canRoll 判过一次，
+			     挂 click 会把「不是你的回合 / 托管中」的点击也当成掷骰子发出去 -->
+			<Dices @roll="$emit('rollDice')"></Dices>
 		</div>
+		<AutoPlayButton v-if="!spectatorMode" :player-id="playerId" />
 	</div>
 </template>
 
@@ -13,6 +16,7 @@
 import { computed } from "vue";
 import DynamicButtonContainer from "./dynamic-button-container.vue";
 import Dices from "./dices.vue";
+import AutoPlayButton from "./auto-play-button.vue";
 
 interface Props {
 	playerId: string;

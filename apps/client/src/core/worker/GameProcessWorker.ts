@@ -413,6 +413,11 @@ async function handleMessage(data: WorkerCommMsg) {
 				operationListener.emit(userId, operateType, _data);
 				if (operateType === OperateType.GameInitFinished) gameProcess?.handleInitSignal(userId, metadata);
 
+				// 托管开关不是「回合内的一次操作」，没有监听器在等它，得直接落到游戏进程上
+				if (operateType === OperateType.ToggleAIControl) {
+					gameProcess?.setPlayerAIControl(userId, Boolean((_data as { enabled?: boolean })?.enabled));
+				}
+
 				// 特殊处理：如果是动画完成事件，检查并调用对应的处理器
 				if (operateType === OperateType.Animation && _data && typeof _data === "string") {
 					const animationId = _data;
@@ -594,6 +599,8 @@ export class GameProcess implements IGameProcess {
 	private playerButtons: Map<string, Map<string, ButtonConfig>> = new Map();
 	/** 跟踪已注册监听器的玩家ID */
 	private playerButtonListeners: Set<string> = new Set();
+	/** 主动开了托管的玩家，跟「掉线自动托管」区分开，重连后要照旧托管 */
+	private autoPlayPlayers: Set<string> = new Set();
 	/** AI 动态按钮决策定时器 */
 	private aiDynamicButtonTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 	/** AI 动态按钮是否正在决策 */
@@ -4286,6 +4293,49 @@ export class GameProcess implements IGameProcess {
 		this.reconnectInitSessions.delete(userId);
 	}
 
+	/**
+	 * 玩家自己开关 AI 托管。托管期间所有决策走 AI，用的是房主那套 AI 设置
+	 * （没有单独绑定的玩家会落到 Room 的全局 aiDecisionConfig 上）。
+	 *
+	 * 和「掉线自动托管」共用 player.isAI 这一个开关，但要单独记一份 autoPlayPlayers：
+	 * 不然玩家开了托管之后断线重连，handlePlayerReconnect 会把托管一并取消掉。
+	 */
+	public setPlayerAIControl(userId: string, enabled: boolean): void {
+		const player = this.players.get(userId);
+		// 旁观者、已出局的人没有这个开关
+		if (!player || player.isBankrupted) return;
+
+		if (enabled) this.autoPlayPlayers.add(userId);
+		else this.autoPlayPlayers.delete(userId);
+
+		// 掉线中的人本来就是 AI 在打，这时只记录意愿，等他回来再按 autoPlayPlayers 生效
+		if (player.isOffline) return;
+		if (player.isAI === enabled) return;
+
+		player.isAI = enabled;
+		console.log(`[AI托管] 玩家 ${player.name} ${enabled ? "开启" : "关闭"}了托管`);
+
+		if (enabled) {
+			// 正轮到他时，引擎已经挂着「等真人操作」的监听了，光翻标志位没人去替他动。
+			// 这两下是把 AI 的掷骰/用卡代理和动态按钮决策现场拉起来，否则要干等到回合超时。
+			this.ensureAIPreRollOperationBroker(player);
+			this.scheduleAIDynamicButtonDecision(userId);
+		} else {
+			// 收回控制权：停掉在跑的 AI 代理，别让它抢在玩家前面出手
+			const timer = this.aiDynamicButtonTimers.get(userId);
+			if (timer) {
+				clearTimeout(timer);
+				this.aiDynamicButtonTimers.delete(userId);
+			}
+			this.aiDynamicButtonInFlight.delete(userId);
+			this.aiDynamicButtonSchedulingSuppressed.delete(userId);
+			this.invalidateAIPreRollOperationSession(userId);
+		}
+
+		this.msgNotifyBroadcast("info", `${player.name} ${enabled ? "开启了 AI 托管" : "取消了 AI 托管"}`);
+		this.gameDataBroadcast();
+	}
+
 	public handlePlayerOffline(userId: string) {
 		if (this.initialInitBarrier.get(userId) === "pending") {
 			this.initialInitBarrier.set(userId, "offline-ai");
@@ -4321,9 +4371,11 @@ export class GameProcess implements IGameProcess {
 			// 不清掉上一次的会话，旧定时器会在这一次握手成功之后才到点，把人重新打成离线 + AI。
 			this.clearReconnectInitSession(userId);
 			player.setIsOffline(false);
-			// 取消AI托管
-			player.isAI = false;
-			console.log(`[AI托管] 玩家 ${player.name} 重连，取消AI托管`);
+			// 取消掉线托管；但玩家自己主动开的托管要留着，不能被一次重连顺手关掉
+			player.isAI = this.autoPlayPlayers.has(userId);
+			console.log(
+				`[AI托管] 玩家 ${player.name} 重连，${player.isAI ? "保持其主动开启的托管" : "取消AI托管"}`,
+			);
 			sendToUsers([userId], {
 				type: SocketMsgType.GameStart,
 				source: SocketMsgSource.Server,
