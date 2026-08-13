@@ -3,6 +3,7 @@ import { createVNode, render, getCurrentInstance, type AppContext } from "vue";
 import SelectorModal from "./selector-modal.vue";
 import { GameEventType } from "@mine-monopoly/types";
 import useEventBus from "@src/utils/event-bus";
+import { onDialogDismiss, DialogDismissedError } from "../dialog-session";
 
 interface SelectorOptions<T = any> {
 	title?: string;
@@ -15,6 +16,14 @@ interface SelectorOptions<T = any> {
 	confirmText?: string;
 	cancelText?: string;
 	content?: string | object;
+	/** 弹窗会话 ID，服务端靠它把这个弹窗收掉 */
+	dialogId?: string;
+	/** 这次由 AI 托管作答，弹窗只做展示 */
+	aiControlled?: boolean;
+	/** 玩家在弹窗里点了「收回控制权」 */
+	onTakeover?: () => void;
+	/** 玩家在弹窗里点了「交还给 AI」 */
+	onResumeai?: () => void;
 }
 
 export function showItemSelector(options: SelectorOptions): Promise<string[]> {
@@ -25,6 +34,12 @@ export function showItemSelector(options: SelectorOptions): Promise<string[]> {
 		// 2. 超时处理
 		const handleTimeout = () => {
 			reject([]);
+			destroy();
+		};
+
+		// 2.1 服务端收掉这次弹窗（例如托管中的 AI 已经替玩家作答）
+		const handleDismiss = () => {
+			reject(new DialogDismissedError());
 			destroy();
 		};
 
@@ -68,10 +83,12 @@ export function showItemSelector(options: SelectorOptions): Promise<string[]> {
 
 		// 8. 注册超时事件监听
 		useEventBus().once(GameEventType.TimeOut, handleTimeout);
+		const offDialogDismiss = onDialogDismiss(options.dialogId, handleDismiss);
 
 		// 9. 销毁逻辑
 		function destroy() {
 			useEventBus().remove(GameEventType.TimeOut, handleTimeout);
+			offDialogDismiss();
 			setTimeout(() => {
 				render(null, container);
 				document.body.removeChild(container);

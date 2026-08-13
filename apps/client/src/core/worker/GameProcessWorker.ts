@@ -99,6 +99,18 @@ type AITurnActionState = {
 	attemptedDynamicButtons: Record<string, string>;
 };
 
+/**
+ * 玩家中途收回控制权时，正在跑的那次 AI 决策就作废了。
+ * 用一个哨兵异常把它从「决策 -> 落子」的链路上摘掉，
+ * 免得模型慢半拍返回之后还去替玩家做动作、还去污染 AI 的记忆。
+ */
+class AIDecisionCanceledError extends Error {
+	name = "AIDecisionCanceledError";
+	constructor() {
+		super("AI decision canceled");
+	}
+}
+
 type AIPreRollOperationTask = {
 	sessionId: number;
 	task: Promise<void>;
@@ -601,6 +613,12 @@ export class GameProcess implements IGameProcess {
 	private playerButtonListeners: Set<string> = new Set();
 	/** 主动开了托管的玩家，跟「掉线自动托管」区分开，重连后要照旧托管 */
 	private autoPlayPlayers: Set<string> = new Set();
+	/** 正在等某人的托管开关翻到指定状态的等待者（用于中途接管/交还时立刻醒过来） */
+	private aiControlWaiters: Map<string, Set<{ target: boolean; wake: () => void }>> = new Map();
+	/** 托管开关的版本号：每动一次加一，用来判断在飞的 AI 决策是不是已经过期 */
+	private aiControlEpochs: Map<string, number> = new Map();
+	/** 弹窗会话号，客户端靠它认出该关掉哪个弹窗 */
+	private dialogSessionSeq: number = 0;
 	/** AI 动态按钮决策定时器 */
 	private aiDynamicButtonTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 	/** AI 动态按钮是否正在决策 */
@@ -1121,6 +1139,7 @@ export class GameProcess implements IGameProcess {
 		this.ensureAIDecisionMetadata(request, playerId, `dynamic-button:${request.title}`);
 
 		this.aiDynamicButtonInFlight.add(playerId);
+		const controlEpoch = this.getAIControlEpoch(playerId);
 		try {
 			console.log(`${AI_LOG_PREFIX} dynamic-button request`, {
 				decisionId: request.metadata?.decisionId,
@@ -1139,6 +1158,20 @@ export class GameProcess implements IGameProcess {
 				playerId,
 				selection,
 			});
+			// 模型返回期间玩家可能已经动过托管开关，这一手就不能再替他按下去了。
+			// 比版本号而不是只看 isAI：关了又开的话新决策已经在跑，这次是旧的，按下去就是重复出手
+			if (
+				this.getAIControlEpoch(playerId) !== controlEpoch ||
+				!this.players.get(playerId)?.isAI ||
+				this.currentRoundPlayer?.id !== playerId
+			) {
+				console.log(`${AI_LOG_PREFIX} dynamic-button discarded`, {
+					decisionId: request.metadata?.decisionId,
+					playerId,
+					reason: "ai_control_changed",
+				});
+				return;
+			}
 			const selectedOptionId = selection.optionId;
 			const selectedOption = request.options.find((option) => option.id === selectedOptionId);
 			const buttonId = String(selectedOption?.payload?.id || selectedOptionId || "");
@@ -1212,7 +1245,9 @@ export class GameProcess implements IGameProcess {
 			return;
 		}
 		const sessionId = this.ensureAIPreRollOperationSession(player.id);
-		if (this.aiPreRollOperationTasks.has(player.id)) {
+		// 比 session 号而不是「有没有任务」：玩家关了又开托管时，上一轮的 broker
+		// 还卡在模型返回上没退出，这时候必须给新 session 起一个，否则没人替他动
+		if (this.aiPreRollOperationTasks.get(player.id)?.sessionId === sessionId) {
 			return;
 		}
 
@@ -2401,24 +2436,19 @@ export class GameProcess implements IGameProcess {
 	): Promise<PlayerOperationResult[T]> {
 		const player = this.players.get(playerId);
 
-		// 如果玩家是AI托管，使用AI决策
-		if (player?.isAI) {
-			if (operationType === OperateType.RollDice || operationType === OperateType.UseChanceCard) {
-				const waitForOperation = operationListener.onceAsyncWithTimeout(playerId, operationType, {
-					timeout: options?.timeout ?? this.defaultTimeoutMs,
-					defaultValue: options?.defaultValue ?? (undefined as any),
-				});
-				this.ensureAIPreRollOperationBroker(player);
-				return await waitForOperation;
-			}
-			return await this.makeAIDecision(player, operationType, {
-				defaultValue: options?.defaultValue,
+		// 掷骰/用卡由预掷骰代理接管，它自己会盯着托管开关
+		if (player?.isAI && (operationType === OperateType.RollDice || operationType === OperateType.UseChanceCard)) {
+			const waitForOperation = operationListener.onceAsyncWithTimeout(playerId, operationType, {
+				timeout: options?.timeout ?? this.defaultTimeoutMs,
+				defaultValue: options?.defaultValue ?? (undefined as any),
 			});
+			this.ensureAIPreRollOperationBroker(player);
+			return await waitForOperation;
 		}
 
-		// 真实玩家，使用带超时的方法
-		return await operationListener.onceAsyncWithTimeout(playerId, operationType, {
-			timeout: options?.timeout ?? this.defaultTimeoutMs,
+		// 其余操作：托管中走 AI，真人则等他自己点，中途开关托管就地换手
+		return await this.resolveOperationWithAIOrPlayer(playerId, operationType, {
+			timeout: options?.timeout,
 			defaultValue: options?.defaultValue ?? (undefined as any),
 		});
 	}
@@ -2459,6 +2489,10 @@ export class GameProcess implements IGameProcess {
 		input?: {
 			option?: unknown;
 			defaultValue?: PlayerOperationResult[T];
+			/** 结果落地前再问一次这次决策是不是已经作废（玩家收回了控制权） */
+			isCanceled?: () => boolean;
+			/** 决策落地后把「AI 选了啥」抄一份出去，用于提示玩家 */
+			onResolved?: (info: { label?: string; reason?: string }) => void;
 		},
 	): Promise<PlayerOperationResult[T]> {
 		const request = this.buildAIDecisionRequest(player, operationType, input?.option);
@@ -2487,6 +2521,17 @@ export class GameProcess implements IGameProcess {
 			})),
 		});
 		const selection = await this.runAIDecision(player, request);
+		// 模型返回期间玩家可能已经收回控制权，这时候这次决策整个作废：
+		// 不落子、不记决策链、也不喂回 AI 记忆
+		if (input?.isCanceled?.()) {
+			console.log(`${AI_LOG_PREFIX} decision discarded`, {
+				decisionId: request.metadata?.decisionId,
+				playerId: player.id,
+				operationType,
+				reason: "player_took_back_control",
+			});
+			throw new AIDecisionCanceledError();
+		}
 		const result = this.mapAIDecisionSelectionToResult(player, request, selection, input?.option, input?.defaultValue);
 		this.rememberAIDecisionChain(player.id, request, selection);
 		aiManager.feedback({
@@ -2494,6 +2539,14 @@ export class GameProcess implements IGameProcess {
 			request,
 			selection,
 			outcome: "mapped-operation",
+		});
+		const chosenIds = selection.optionIds || (selection.optionId ? [selection.optionId] : []);
+		input?.onResolved?.({
+			label: request.options
+				.filter((item) => chosenIds.includes(item.id))
+				.map((item) => item.label)
+				.join("、"),
+			reason: selection.reason,
 		});
 		console.log(`${AI_LOG_PREFIX} mapped result`, {
 			decisionId: request.metadata?.decisionId,
@@ -2503,6 +2556,184 @@ export class GameProcess implements IGameProcess {
 			result,
 		});
 		return result;
+	}
+
+	/**
+	 * 等某个玩家的托管开关翻到 target 状态。
+	 * 返回的 dispose 一定要调，不然等待者会一直挂在表里。
+	 */
+	private waitForAIControlState(playerId: string, target: boolean): { promise: Promise<void>; dispose: () => void } {
+		let wake!: () => void;
+		const promise = new Promise<void>((resolve) => {
+			wake = resolve;
+		});
+		const waiter = { target, wake };
+		const waiters = this.aiControlWaiters.get(playerId) || new Set<{ target: boolean; wake: () => void }>();
+		waiters.add(waiter);
+		this.aiControlWaiters.set(playerId, waiters);
+		return {
+			promise,
+			dispose: () => {
+				const current = this.aiControlWaiters.get(playerId);
+				if (!current) return;
+				current.delete(waiter);
+				if (current.size === 0) this.aiControlWaiters.delete(playerId);
+			},
+		};
+	}
+
+	private getAIControlEpoch(playerId: string): number {
+		return this.aiControlEpochs.get(playerId) ?? 0;
+	}
+
+	/** 托管开关变了：版本号 +1（作废在飞的决策），再把在等这个状态的人叫醒 */
+	private notifyAIControlChanged(playerId: string): void {
+		this.aiControlEpochs.set(playerId, this.getAIControlEpoch(playerId) + 1);
+		const waiters = this.aiControlWaiters.get(playerId);
+		if (!waiters?.size) return;
+		const isAI = Boolean(this.players.get(playerId)?.isAI);
+		for (const waiter of Array.from(waiters)) {
+			if (waiter.target !== isAI) continue;
+			waiters.delete(waiter);
+			waiter.wake();
+		}
+		if (waiters.size === 0) this.aiControlWaiters.delete(playerId);
+	}
+
+	/**
+	 * 跑一次可被打断的 AI 决策：玩家中途收回控制权就立刻返回 canceled，
+	 * 在飞的那次请求继续跑完但结果丢掉（fetch 没法真的撤回）。
+	 */
+	private async runInterruptibleAIDecision<T extends OperateType>(
+		player: Player,
+		operationType: T,
+		input: {
+			option?: unknown;
+			defaultValue?: PlayerOperationResult[T];
+			onResolved?: (info: { label?: string; reason?: string }) => void;
+		},
+	): Promise<{ status: "done"; value: PlayerOperationResult[T] } | { status: "canceled" }> {
+		let canceled = false;
+		const controlEpoch = this.getAIControlEpoch(player.id);
+		const waiter = this.waitForAIControlState(player.id, false);
+		const decision = this.makeAIDecision(player, operationType, {
+			...input,
+			isCanceled: () => canceled || this.getAIControlEpoch(player.id) !== controlEpoch,
+		})
+			.then((value) => ({ status: "done" as const, value }))
+			.catch((error) => {
+				if (error instanceof AIDecisionCanceledError) return { status: "canceled" as const };
+				console.error(`${AI_LOG_PREFIX} decision failed`, { playerId: player.id, operationType, error });
+				return {
+					status: "done" as const,
+					value: this.buildAIDefaultOperationResult(player, operationType, input.option, input.defaultValue),
+				};
+			});
+
+		try {
+			const outcome = await Promise.race([
+				decision,
+				waiter.promise.then(() => {
+					canceled = true;
+					return { status: "canceled" as const };
+				}),
+			]);
+			if (outcome.status === "canceled") {
+				// 结果不要了，但别让它变成 unhandled rejection
+				void decision.catch(() => undefined);
+			}
+			return outcome;
+		} finally {
+			waiter.dispose();
+		}
+	}
+
+	/**
+	 * 一次「谁来作答」的完整等待：托管中交给 AI，真人操作则等他点。
+	 * 中途开关托管就地换手 —— 收回控制权立刻打断 AI，重新开启托管则由 AI 接着做。
+	 */
+	private async resolveOperationWithAIOrPlayer<T extends OperateType>(
+		playerId: string,
+		operationType: T,
+		params: {
+			option?: unknown;
+			timeout?: number;
+			defaultValue: PlayerOperationResult[T];
+			/** 把弹窗推给玩家（托管中是只读镜像），没有弹窗的操作可以不传 */
+			showDialog?: (session: { dialogId: string; aiControlled: boolean }) => void;
+		},
+	): Promise<PlayerOperationResult[T]> {
+		const dialogId = `dialog-${++this.dialogSessionSeq}`;
+		let dialogShown = false;
+		let aiChoice: string | undefined;
+
+		const showDialogOnce = (aiControlled: boolean) => {
+			if (dialogShown || !params.showDialog) return;
+			dialogShown = true;
+			params.showDialog({ dialogId, aiControlled });
+		};
+
+		try {
+			// eslint-disable-next-line no-constant-condition
+			while (true) {
+				const player = this.players.get(playerId);
+
+				if (player?.isAI) {
+					// 托管中也把弹窗发给本人：他得看得见 AI 正在替他处理什么事件
+					if (this.shouldMirrorDialogToPlayer(player)) showDialogOnce(true);
+					const outcome = await this.runInterruptibleAIDecision(player, operationType, {
+						option: params.option,
+						defaultValue: params.defaultValue,
+						onResolved: (info) => {
+							aiChoice = info.label || undefined;
+						},
+					});
+					if (outcome.status === "done") return outcome.value;
+					// 玩家收回控制权：AI 那次决策已经丢掉，接下来等他自己操作
+					continue;
+				}
+
+				showDialogOnce(false);
+				const waiter = this.waitForAIControlState(playerId, true);
+				const wait = operationListener.onceAsyncWithTimeoutCancelable(playerId, operationType, {
+					timeout: params.timeout ?? this.defaultTimeoutMs,
+					defaultValue: params.defaultValue,
+				});
+				try {
+					const outcome = await Promise.race([
+						wait.promise,
+						waiter.promise.then(() => {
+							// 玩家又把托管打开了，把等真人的监听和倒计时撤掉，回到 AI 分支
+							wait.cancel();
+							return wait.promise;
+						}),
+					]);
+					if (outcome.status === "canceled") continue;
+					return outcome.value;
+				} finally {
+					waiter.dispose();
+				}
+			}
+		} finally {
+			if (dialogShown) this.dismissDialog(playerId, dialogId, aiChoice);
+		}
+	}
+
+	/**
+	 * 这次弹窗要不要照旧推给本人。
+	 * 只针对自己开了托管、人还在线的玩家：掉线托管和纯 AI 玩家那边根本没人看。
+	 */
+	private shouldMirrorDialogToPlayer(player: Player): boolean {
+		return player.isAI && !player.isOffline && this.autoPlayPlayers.has(player.id);
+	}
+
+	/** 通知客户端收掉这次弹窗（AI 作答完 / 超时 / 流程走完都不会有人再去点它） */
+	private dismissDialog(playerId: string, dialogId: string, aiChoice?: string): void {
+		sendToUsers([playerId], {
+			type: SocketMsgType.DialogDismiss,
+			source: SocketMsgSource.Server,
+			data: { playerId, dialogId, aiChoice },
+		});
 	}
 
 	private isChainableAIDecisionScene(scene: AIDecisionRequest["scene"] | undefined): boolean {
@@ -3596,31 +3827,22 @@ export class GameProcess implements IGameProcess {
 		option: ConfirmDialogOption,
 		config?: { timeout?: number; defaultValue?: ConfirmDialogResult },
 	): Promise<ConfirmDialogResult> {
-		const player = this.players.get(playerId);
-
-		// 如果玩家是AI托管，直接返回决策，不显示对话框
-		if (player?.isAI) {
-			console.log(`${AI_LOG_PREFIX} intercept confirm dialog for AI`, {
-				playerId,
-				title: option.title,
-			});
-			return (await this.makeAIDecision(player, OperateType.ConfirmDialogResult, { option })) as ConfirmDialogResult;
-		}
-
-		// 真实玩家，显示对话框
-		sendToUsers([playerId], {
-			type: SocketMsgType.ConfirmDialog,
-			source: SocketMsgSource.Server,
-			data: {
-				playerId,
-				option,
-			},
-		});
-
-		// 使用带超时的方法
-		return (await operationListener.onceAsyncWithTimeout(playerId, OperateType.ConfirmDialogResult, {
-			timeout: config?.timeout ?? this.defaultTimeoutMs,
+		return (await this.resolveOperationWithAIOrPlayer(playerId, OperateType.ConfirmDialogResult, {
+			option,
+			timeout: config?.timeout,
 			defaultValue: config?.defaultValue ?? { id: playerId, confirm: false },
+			showDialog: ({ dialogId, aiControlled }) => {
+				sendToUsers([playerId], {
+					type: SocketMsgType.ConfirmDialog,
+					source: SocketMsgSource.Server,
+					data: {
+						playerId,
+						option,
+						dialogId,
+						aiControlled,
+					},
+				});
+			},
 		})) as ConfirmDialogResult;
 	}
 
@@ -3629,33 +3851,22 @@ export class GameProcess implements IGameProcess {
 		option: TargetSelectDialogOption<I>,
 		config?: { timeout?: number; defaultValue?: TargetSelectDialogResult<I> },
 	): Promise<TargetSelectDialogResult<I>> {
-		const player = this.players.get(playerId);
-
-		// 如果玩家是AI托管，直接返回决策，不显示对话框
-		if (player?.isAI) {
-			console.log(`${AI_LOG_PREFIX} intercept target dialog for AI`, {
-				playerId,
-				title: option.title,
-				type: option.type,
-			});
-			return (await this.makeAIDecision(player, OperateType.TargetSelectDialogResult, {
-				option,
-			})) as TargetSelectDialogResult<I>;
-		}
-
-		// 真实玩家，显示对话框
-		sendToUsers([playerId], {
-			type: SocketMsgType.TargetSelectDialog,
-			source: SocketMsgSource.Server,
-			data: {
-				playerId,
-				option,
-			},
-		});
-
-		return (await operationListener.onceAsyncWithTimeout(playerId, OperateType.TargetSelectDialogResult, {
-			timeout: config?.timeout ?? this.defaultTimeoutMs,
+		return (await this.resolveOperationWithAIOrPlayer(playerId, OperateType.TargetSelectDialogResult, {
+			option,
+			timeout: config?.timeout,
 			defaultValue: config?.defaultValue ?? { target: [] },
+			showDialog: ({ dialogId, aiControlled }) => {
+				sendToUsers([playerId], {
+					type: SocketMsgType.TargetSelectDialog,
+					source: SocketMsgSource.Server,
+					data: {
+						playerId,
+						option,
+						dialogId,
+						aiControlled,
+					},
+				});
+			},
 		})) as TargetSelectDialogResult<I>;
 	}
 
@@ -3664,33 +3875,22 @@ export class GameProcess implements IGameProcess {
 		option: ItemSelectDialogOption,
 		config?: { timeout?: number; defaultValue?: ItemSelectDialogResult },
 	): Promise<ItemSelectDialogResult> {
-		const player = this.players.get(playerId);
-
-		// 如果玩家是AI托管，直接返回决策，不显示对话框
-		if (player?.isAI) {
-			console.log(`${AI_LOG_PREFIX} intercept item dialog for AI`, {
-				playerId,
-				title: option.title,
-				itemCount: option.itemList?.length || 0,
-			});
-			return (await this.makeAIDecision(player, OperateType.ItemSelectDialogResult, {
-				option,
-			})) as ItemSelectDialogResult;
-		}
-
-		// 真实玩家，显示对话框
-		sendToUsers([playerId], {
-			type: SocketMsgType.ItemSelectDialog,
-			source: SocketMsgSource.Server,
-			data: {
-				playerId,
-				option,
-			},
-		});
-
-		return (await operationListener.onceAsyncWithTimeout(playerId, OperateType.ItemSelectDialogResult, {
-			timeout: config?.timeout ?? this.defaultTimeoutMs,
+		return (await this.resolveOperationWithAIOrPlayer(playerId, OperateType.ItemSelectDialogResult, {
+			option,
+			timeout: config?.timeout,
 			defaultValue: config?.defaultValue ?? { selected: [] },
+			showDialog: ({ dialogId, aiControlled }) => {
+				sendToUsers([playerId], {
+					type: SocketMsgType.ItemSelectDialog,
+					source: SocketMsgSource.Server,
+					data: {
+						playerId,
+						option,
+						dialogId,
+						aiControlled,
+					},
+				});
+			},
 		})) as ItemSelectDialogResult;
 	}
 
@@ -3706,34 +3906,22 @@ export class GameProcess implements IGameProcess {
 		option: FormDialogOption<F>,
 		config?: { timeout?: number; defaultValue?: FormDialogResult<F> },
 	): Promise<FormDialogResult<F>> {
-		const player = this.players.get(playerId);
-
-		// 如果玩家是 AI 托管，直接返回决策，不显示对话框
-		if (player?.isAI) {
-			console.log(`${AI_LOG_PREFIX} intercept form dialog for AI`, {
-				playerId,
-				title: option.title,
-				fieldCount: option.fields?.length || 0,
-			});
-			return (await this.makeAIDecision(player, OperateType.FormDialogResult, {
-				option,
-			})) as FormDialogResult<F>;
-		}
-
-		// 真实玩家，显示表单对话框
-		sendToUsers([playerId], {
-			type: SocketMsgType.FormDialog,
-			source: SocketMsgSource.Server,
-			data: {
-				playerId,
-				option,
-			},
-		});
-
-		// 使用带超时的方法等待响应
-		return (await operationListener.onceAsyncWithTimeout(playerId, OperateType.FormDialogResult, {
-			timeout: config?.timeout ?? this.defaultTimeoutMs,
+		return (await this.resolveOperationWithAIOrPlayer(playerId, OperateType.FormDialogResult, {
+			option,
+			timeout: config?.timeout,
 			defaultValue: config?.defaultValue ?? this.buildDefaultFormResult(option.fields),
+			showDialog: ({ dialogId, aiControlled }) => {
+				sendToUsers([playerId], {
+					type: SocketMsgType.FormDialog,
+					source: SocketMsgSource.Server,
+					data: {
+						playerId,
+						option,
+						dialogId,
+						aiControlled,
+					},
+				});
+			},
 		})) as FormDialogResult<F>;
 	}
 
@@ -3969,6 +4157,7 @@ export class GameProcess implements IGameProcess {
 			context: this.buildAIDecisionContext(player),
 		};
 		this.ensureAIDecisionMetadata(request, playerId, `scripted:${request.title}`);
+		const controlEpoch = this.getAIControlEpoch(playerId);
 
 		try {
 			console.log(`${AI_LOG_PREFIX} scripted request`, {
@@ -3984,6 +4173,15 @@ export class GameProcess implements IGameProcess {
 				})),
 			});
 			const selection = await this.runAIDecision(player, request);
+			// 模型返回期间玩家收回了控制权：这次结果作废，调用方按「没有 AI 作答」处理
+			if (this.getAIControlEpoch(playerId) !== controlEpoch || !this.players.get(playerId)?.isAI) {
+				console.log(`${AI_LOG_PREFIX} scripted selection discarded`, {
+					decisionId: request.metadata?.decisionId,
+					playerId,
+					reason: "ai_control_changed",
+				});
+				return null;
+			}
 			aiManager.feedback({
 				playerId,
 				request,
@@ -4330,7 +4528,12 @@ export class GameProcess implements IGameProcess {
 			this.aiDynamicButtonInFlight.delete(userId);
 			this.aiDynamicButtonSchedulingSuppressed.delete(userId);
 			this.invalidateAIPreRollOperationSession(userId);
+			// 在飞的那次决策已经作废，头顶的思考气泡也别再挂着了
+			player.clearAIThinking();
 		}
+
+		// 有人卡在「等 AI 作答」或「等真人点」上，就地换手
+		this.notifyAIControlChanged(userId);
 
 		this.msgNotifyBroadcast("info", `${player.name} ${enabled ? "开启了 AI 托管" : "取消了 AI 托管"}`);
 		this.gameDataBroadcast();

@@ -28,6 +28,7 @@ import { debounce, getDisplayValueByFormSchema } from "@src/utils";
 import { SocketMsgSource } from "@mine-monopoly/types";
 import { FPMessage } from "@mine-monopoly/ui";
 import { FPMessageBox } from "@src/components/utils/fp-message-box";
+import { DialogDismissedError, emitDialogDismiss } from "@src/components/utils/dialog-session";
 import router from "@src/router";
 import useEventBus from "@src/utils/event-bus";
 import { createVNode } from "vue";
@@ -193,6 +194,9 @@ export function handleServerSocketMessage(msg: ServerSocketMessage, client: Mono
 			break;
 		case SocketMsgType.ItemSelectDialog:
 			handleItemSelectDialog(msg, client);
+			break;
+		case SocketMsgType.DialogDismiss:
+			handleDialogDismiss(msg, client);
 			break;
 		case SocketMsgType.MessageCard:
 			handleMessageCardDialog(msg, client);
@@ -640,7 +644,10 @@ const handleGameResume: ServerMessageHandler<SocketMsgType.ResumeGame> = () => {
 
 const handleConfirmDialog: ServerMessageHandler<SocketMsgType.ConfirmDialog> = (msg, client) => {
 	const data = msg.data;
-	FPMessageBox(data.option)
+	FPMessageBox({
+		...data.option,
+		...buildAIMirrorOptions(data, client),
+	})
 		.then(() => {
 			client.sendMsg({
 				type: SocketMsgType.Operation,
@@ -651,7 +658,9 @@ const handleConfirmDialog: ServerMessageHandler<SocketMsgType.ConfirmDialog> = (
 				},
 			});
 		})
-		.catch(() => {
+		.catch((error) => {
+			// 服务端收掉的弹窗（AI 已经替他答完了），别再回一个「取消」上去
+			if (error instanceof DialogDismissedError) return;
 			client.sendMsg({
 				type: SocketMsgType.Operation,
 				source: SocketMsgSource.Client,
@@ -684,6 +693,7 @@ const handleFormDialog: ServerMessageHandler<SocketMsgType.FormDialog> = (msg, c
 		form: formSchema,
 		confirmText: data.option.confirmText || "提交",
 		cancelText: data.option.cancelText || "取消",
+		...buildAIMirrorOptions(data, client),
 	})
 		.then((formData) => {
 			// 用户提交，formData 包含表单数据
@@ -700,7 +710,9 @@ const handleFormDialog: ServerMessageHandler<SocketMsgType.FormDialog> = (msg, c
 				},
 			});
 		})
-		.catch(() => {
+		.catch((error) => {
+			// 服务端收掉的弹窗（AI 已经替他答完了），别再回一个「取消」上去
+			if (error instanceof DialogDismissedError) return;
 			// 用户取消，发送默认值
 			const defaultData = buildDefaultFormData(data.option.fields);
 
@@ -721,7 +733,12 @@ const handleFormDialog: ServerMessageHandler<SocketMsgType.FormDialog> = (msg, c
 
 const handleTargetSelect: ServerMessageHandler<SocketMsgType.TargetSelectDialog> = (msg, client) => {
 	const data = msg.data;
-	showTargetSelector(data.option.type)
+	showTargetSelector(data.option.type, {
+		title: data.option.title || "选择目标",
+		confirmText: data.option.confirmText,
+		cancelText: data.option.cancelText,
+		...buildAIMirrorOptions(data, client),
+	})
 		.then((res) => {
 			client.sendMsg({
 				type: SocketMsgType.Operation,
@@ -732,7 +749,9 @@ const handleTargetSelect: ServerMessageHandler<SocketMsgType.TargetSelectDialog>
 				},
 			});
 		})
-		.catch(() => {
+		.catch((error) => {
+			// 服务端收掉的弹窗（AI 已经替他答完了），别再回一个「取消」上去
+			if (error instanceof DialogDismissedError) return;
 			client.sendMsg({
 				type: SocketMsgType.Operation,
 				source: SocketMsgSource.Client,
@@ -746,7 +765,10 @@ const handleTargetSelect: ServerMessageHandler<SocketMsgType.TargetSelectDialog>
 
 const handleItemSelectDialog: ServerMessageHandler<SocketMsgType.ItemSelectDialog> = (msg, client) => {
 	const data = msg.data;
-	showItemSelector(data.option)
+	showItemSelector({
+		...data.option,
+		...buildAIMirrorOptions(data, client),
+	})
 		.then((res) => {
 			client.sendMsg({
 				type: SocketMsgType.Operation,
@@ -757,7 +779,9 @@ const handleItemSelectDialog: ServerMessageHandler<SocketMsgType.ItemSelectDialo
 				},
 			});
 		})
-		.catch(() => {
+		.catch((error) => {
+			// 服务端收掉的弹窗（AI 已经替他答完了），别再回一个「取消」上去
+			if (error instanceof DialogDismissedError) return;
 			client.sendMsg({
 				type: SocketMsgType.Operation,
 				source: SocketMsgSource.Client,
@@ -767,6 +791,29 @@ const handleItemSelectDialog: ServerMessageHandler<SocketMsgType.ItemSelectDialo
 				},
 			});
 		});
+};
+
+/**
+ * 托管期间弹窗照发给玩家本人，只是改成只读展示。
+ * 这里把「哪一个弹窗、是不是 AI 在答、点收回控制权怎么办」一起配好。
+ */
+function buildAIMirrorOptions(
+	data: { dialogId?: string; aiControlled?: boolean },
+	client: MonopolyClient,
+): { dialogId?: string; aiControlled?: boolean; onTakeover: () => void; onResumeai: () => void } {
+	return {
+		dialogId: data.dialogId,
+		aiControlled: data.aiControlled,
+		onTakeover: () => client.setAIControl(false),
+		// 弹窗开着的时候操作面板被遮住了，收回/交还都得在弹窗里给口子
+		onResumeai: () => client.setAIControl(true),
+	};
+}
+
+const handleDialogDismiss: ServerMessageHandler<SocketMsgType.DialogDismiss> = (msg) => {
+	const { dialogId, aiChoice } = msg.data;
+	emitDialogDismiss(dialogId);
+	if (aiChoice) FPMessage({ type: "info", message: `AI 托管替你选择了：${aiChoice}` });
 };
 
 const handleMessageCardDialog: ServerMessageHandler<SocketMsgType.MessageCard> = (msg, client) => {

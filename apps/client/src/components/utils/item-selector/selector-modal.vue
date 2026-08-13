@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, PropType, computed } from "vue";
+import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import FpDialog from "../fp-dialog/fp-dialog.vue";
 import ItemSelector from "./item-selector.vue";
 import HtmlRenderer from "../ui-renderer/ui-renderer.vue";
 import type { UISchema } from "@mine-monopoly/types";
 import { parseRichText } from "@mine-monopoly/utils";
+import { useGameData } from "@src/store/game";
 
 // 定义接收的参数
 const props = defineProps({
@@ -23,9 +25,15 @@ const props = defineProps({
 	// 按钮文本
 	confirmText: { type: String, default: "确认" },
 	cancelText: { type: String, default: undefined },
+	// 这次弹窗由 AI 托管作答，本人只能看
+	aiControlled: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["confirm", "cancel"]);
+const emit = defineEmits(["confirm", "cancel", "takeover", "resumeai"]);
+
+const gameDataStore = useGameData();
+// 跟着 isAI 走：玩家中途收回控制权，这个弹窗要就地变回可点的
+const aiActing = computed(() => props.aiControlled && Boolean(gameDataStore.myGameInfo?.isAI));
 
 const visible = ref(false);
 const currentSelected = ref<string | string[]>(props.multiple ? [] : "");
@@ -85,6 +93,14 @@ const handleCancel = () => {
 	emit("cancel");
 	visible.value = false;
 };
+
+const handleTakeOver = () => {
+	emit("takeover");
+};
+
+const handleResumeAI = () => {
+	emit("resumeai");
+};
 </script>
 
 <template>
@@ -93,6 +109,8 @@ const handleCancel = () => {
 		:append-to-body="false"
 		:confirm-text="confirmText"
 		:cancel-text="cancelText"
+		:closable="!aiActing"
+		:hidden-footer="aiActing"
 		@submit="handleSubmit"
 		@cancel="handleCancel"
 	>
@@ -107,6 +125,7 @@ const handleCancel = () => {
 
 			<!-- 物品选择器 -->
 			<ItemSelector
+				:class="{ 'ai-locked': aiActing }"
 				:column="column"
 				:item-list="itemList"
 				:key-name="keyName"
@@ -121,6 +140,21 @@ const handleCancel = () => {
 					</div>
 				</template>
 			</ItemSelector>
+
+			<!-- 托管中：东西照样摆出来给人看，只是这一手由 AI 出 -->
+			<div v-if="aiActing" class="ai-footer">
+				<span class="ai-hint">
+					<FontAwesomeIcon class="ai-icon" icon="robot" />
+					AI 托管中，正在替你决定…
+				</span>
+				<button class="btn-takeover" @click="handleTakeOver">收回控制权</button>
+			</div>
+
+			<!-- 刚从 AI 手里收回来：留个口子，想接着托管就再交回去 -->
+			<div v-else-if="aiControlled" class="ai-footer">
+				<span class="ai-hint">已收回控制权，这一手由你自己决定</span>
+				<button class="btn-takeover" @click="handleResumeAI">交还给 AI</button>
+			</div>
 		</div>
 	</FpDialog>
 </template>
@@ -149,5 +183,53 @@ const handleCancel = () => {
 	padding: 1.25rem;
 	text-align: center;
 	font-weight: bold;
+}
+
+/* 托管期间物品只给看不给点，滚动还留给外层容器 */
+.ai-locked {
+	pointer-events: none;
+}
+
+.ai-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	margin-top: 0.9rem;
+	padding-top: 0.7rem;
+	border-top: 0.0625rem dashed var(--fp-color-border-light);
+}
+
+.ai-footer .ai-hint {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	color: var(--fp-color-text-secondary);
+	font-size: 0.9rem;
+}
+
+.ai-footer .ai-icon {
+	animation: ai-thinking-pulse 1.6s ease-in-out infinite;
+}
+
+.ai-footer .btn-takeover {
+	flex-shrink: 0;
+	padding: 0.5em 1.2em;
+	border: 0.0625rem solid var(--fp-color-tertiary);
+	border-radius: 0.375rem;
+	background-color: #ffffff;
+	color: var(--fp-color-tertiary);
+	font-size: 0.95rem;
+	cursor: pointer;
+}
+
+@keyframes ai-thinking-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.4;
+	}
 }
 </style>

@@ -230,27 +230,66 @@ export class OperateListener {
 			defaultValue: PlayerOperationResult[T];
 		},
 	): Promise<PlayerOperationResult[T]> {
+		const outcome = await this.onceAsyncWithTimeoutCancelable(playerId, eventType, options).promise;
+		return outcome.status === "canceled" ? options.defaultValue : outcome.value;
+	}
+
+	/**
+	 * 带超时的异步操作等待，额外给出一个「不等了」的口子。
+	 * 用于等真人操作的过程中要改主意的场景（比如中途开了 AI 托管，
+	 * 该由 AI 接手，就得把监听器和倒计时一起撤掉，不能让它挂着到超时）。
+	 */
+	public onceAsyncWithTimeoutCancelable<T extends OperateType>(
+		playerId: string,
+		eventType: T,
+		options: {
+			timeout?: number;
+			defaultValue: PlayerOperationResult[T];
+		},
+	): {
+		promise: Promise<
+			| { status: "resolved" | "timeout"; value: PlayerOperationResult[T] }
+			| { status: "canceled"; value?: undefined }
+		>;
+		cancel: () => void;
+	} {
 		const timeout = options.timeout ?? DEFAULT_TIMEOUT;
 		const timerKey = this.generateTimerKey();
 		const startTime = Date.now();
 
-		return new Promise((resolve) => {
+		let settled = false;
+		let cancel = () => {};
+
+		const promise = new Promise<
+			| { status: "resolved" | "timeout"; value: PlayerOperationResult[T] }
+			| { status: "canceled"; value?: undefined }
+		>((resolve) => {
 			// 创建操作监听器
 			const listener = (data: PlayerOperationResult[T]) => {
+				settled = true;
 				this.clearTimer(timerKey);
-				resolve(data);
+				resolve({ status: "resolved", value: data });
 			};
 
 			this.once(playerId, eventType, listener);
 
 			// 设置超时定时器
 			const timeoutId = setTimeout(() => {
+				settled = true;
 				this.clearTimer(timerKey);
 				this.removeAll(playerId, eventType);
 				// 通知服务器发生了超时
 				this.timeoutCallback?.(playerId, eventType);
-				resolve(options.defaultValue);
+				resolve({ status: "timeout", value: options.defaultValue });
 			}, timeout);
+
+			cancel = () => {
+				if (settled) return;
+				settled = true;
+				this.clearTimer(timerKey);
+				this.remove(playerId, eventType, listener as (...args: any[]) => PlayerOperationResult[T]);
+				resolve({ status: "canceled" });
+			};
 
 			// 保存定时器数据
 			this.activeTimers.set(timerKey, {
@@ -276,6 +315,8 @@ export class OperateListener {
 				}
 			}
 		});
+
+		return { promise, cancel: () => cancel() };
 	}
 
 	/**

@@ -609,6 +609,10 @@ export interface SocketMessageDataType {
 			playerId: string;
 			/** 对话框选项 */
 			option: ConfirmDialogOption;
+			/** 对话框会话 ID，用于服务端主动关闭这次弹窗 */
+			dialogId?: string;
+			/** 这次弹窗由 AI 托管作答，客户端只做展示 */
+			aiControlled?: boolean;
 		};
 	};
 
@@ -625,6 +629,10 @@ export interface SocketMessageDataType {
 			playerId: string;
 			/** 对话框选项 */
 			option: TargetSelectDialogOption<TargetSelectType>;
+			/** 对话框会话 ID，用于服务端主动关闭这次弹窗 */
+			dialogId?: string;
+			/** 这次弹窗由 AI 托管作答，客户端只做展示 */
+			aiControlled?: boolean;
 		};
 	};
 
@@ -641,6 +649,10 @@ export interface SocketMessageDataType {
 			playerId: string;
 			/** 对话框选项 */
 			option: ItemSelectDialogOption;
+			/** 对话框会话 ID，用于服务端主动关闭这次弹窗 */
+			dialogId?: string;
+			/** 这次弹窗由 AI 托管作答，客户端只做展示 */
+			aiControlled?: boolean;
 		};
 	};
 
@@ -671,6 +683,29 @@ export interface SocketMessageDataType {
 			playerId: string;
 			/** 表单对话框选项 */
 			option: FormDialogOption<FormField<string, any>[]>;
+			/** 对话框会话 ID，用于服务端主动关闭这次弹窗 */
+			dialogId?: string;
+			/** 这次弹窗由 AI 托管作答，客户端只做展示 */
+			aiControlled?: boolean;
+		};
+	};
+
+	/**
+	 * 关闭对话框
+	 * 服务器通知客户端把还开着的那个弹窗收掉：
+	 * 托管期间弹窗只是给玩家看的镜像，AI 作答后没人会去点它
+	 */
+	[SocketMsgType.DialogDismiss]: {
+		/** 客户端发送的数据（不支持） */
+		client: undefined;
+		/** 服务器发送的关闭指令 */
+		server: {
+			/** 玩家 ID */
+			playerId: string;
+			/** 要关闭的对话框会话 ID */
+			dialogId: string;
+			/** AI 最终选了什么（有的话客户端提示一下） */
+			aiChoice?: string;
 		};
 	};
 

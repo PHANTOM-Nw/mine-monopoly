@@ -16,6 +16,7 @@ import useEventBus from "@src/utils/event-bus";
 import DynamicButton from "./dynamic-button.vue";
 import { useMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
 import { useUtil } from "@src/store";
+import { useGameData } from "@src/store/game";
 
 interface Props {
 	playerId: string;
@@ -27,8 +28,14 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const buttons = ref<ButtonConfig[]>([]);
+/** 服务器对每个按钮的 enabled 意见，跟回合状态分开记，否则回合一变就把它冲掉了 */
+const serverEnabledMap = new Map<string, boolean>();
 const eventBus = useEventBus();
 const utilStore = useUtil();
+const gameDataStore = useGameData();
+
+// 托管期间这些按钮由 AI 来按，本人置灰，免得两边同时出手
+const isAutoPlay = computed(() => Boolean(gameDataStore.myGameInfo?.isAI));
 
 const visibleButtonsList = computed(() => {
 	return buttons.value.filter((b) => b.visible);
@@ -38,34 +45,34 @@ const layoutClass = computed(() => {
 	return `layout-${props.layout}`;
 });
 
+// 按钮最终可不可点：服务器说了算 + 得是自己的回合 + 没在托管
+const resolveButtonEnabled = (buttonId: string) => {
+	return (serverEnabledMap.get(buttonId) ?? true) && utilStore.canRoll && !isAutoPlay.value;
+};
+
 // 根据回合状态调整按钮启用状态
 const updateButtonsEnabledState = () => {
-	const canRoll = utilStore.canRoll;
-
 	buttons.value.forEach((button) => {
-		// 只有在自己回合(canRoll = true)时，按钮才能使用
-		button.enabled = canRoll;
+		button.enabled = resolveButtonEnabled(button.id);
 	});
 
 	// 触发响应式更新
 	buttons.value = [...buttons.value];
 };
 
-// 监听 canRoll 状态变化
-watch(
-	() => utilStore.canRoll,
-	() => {
-		updateButtonsEnabledState();
-	},
-);
+// 监听回合状态和托管状态变化
+watch([() => utilStore.canRoll, isAutoPlay], () => {
+	updateButtonsEnabledState();
+});
 
 // 事件处理器
 const handleButtonRegister = (message: ButtonRegisterMessage) => {
+	serverEnabledMap.set(message.buttonId, message.enabled);
 	const button: ButtonConfig = {
 		id: message.buttonId,
 		playerId: props.playerId,
 		text: message.text,
-		enabled: message.enabled && utilStore.canRoll, // 结合服务器状态和回合状态
+		enabled: resolveButtonEnabled(message.buttonId), // 结合服务器状态、回合状态和托管状态
 		visible: message.visible,
 		callback: () => {},
 	};
@@ -77,8 +84,8 @@ const handleButtonStateChanged = (message: ButtonStateChangedMessage) => {
 	const button = buttons.value.find((b) => b.id === message.buttonId);
 	if (button) {
 		if (message.enabled !== undefined) {
-			// 服务器设置的 enabled 状态需要结合 canRoll 来决定最终状态
-			button.enabled = message.enabled && utilStore.canRoll;
+			serverEnabledMap.set(message.buttonId, message.enabled);
+			button.enabled = resolveButtonEnabled(message.buttonId);
 		}
 		if (message.visible !== undefined) {
 			button.visible = message.visible;
@@ -91,6 +98,7 @@ const handleButtonStateChanged = (message: ButtonStateChangedMessage) => {
 };
 
 const handleButtonRemove = (message: ButtonRemoveMessage) => {
+	serverEnabledMap.delete(message.buttonId);
 	const index = buttons.value.findIndex((b) => b.id === message.buttonId);
 	if (index !== -1) {
 		buttons.value.splice(index, 1);
@@ -98,6 +106,8 @@ const handleButtonRemove = (message: ButtonRemoveMessage) => {
 };
 
 const handleButtonClick = (buttonId: string) => {
+	// 托管中这一手归 AI，本人点了不算
+	if (isAutoPlay.value) return;
 	const socketClient = useMonopolyClient();
 	if (socketClient) {
 		socketClient.sendDynamicButtonClick(buttonId);
