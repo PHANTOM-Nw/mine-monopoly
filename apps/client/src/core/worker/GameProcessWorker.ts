@@ -381,10 +381,12 @@ async function handleMessage(data: WorkerCommMsg) {
 		case WorkerCommType.LoadGameInfo:
 			{
 				try {
-					const { mapInfo, setting, userList, roomOwnerId, aiConfig, saveData, initSessionId } = data.data;
+					const { mapInfo, setting, userList, spectatorIdList, roomOwnerId, aiConfig, saveData, initSessionId } =
+						data.data;
 					applyAIDecisionConfig(aiConfig);
 					gameProcess = new GameProcess(mapInfo, setting, userList, roomOwnerId);
 					gameProcess.setInitSessionId(initSessionId);
+					gameProcess.setInitSpectatorIds(spectatorIdList ?? []);
 					if (saveData) gameProcess.setPendingSaveData(saveData);
 					void gameProcess.start().catch((error) => {
 						reportWorkerError(error, "GameProcess.start");
@@ -521,6 +523,8 @@ function sendToUsers(userIdList: string[], msg: ServerSocketMessage) {
 
 export class GameProcess implements IGameProcess {
 	private initSessionId = "";
+	/** 开局时在场的旁观者，进初始化屏障但不属于玩家 */
+	private initSpectatorIds = new Set<string>();
 	private initialInitBarrier = new Map<string, "pending" | "ready" | "failed" | "offline-ai">();
 	private initialInitResolve: (() => void) | null = null;
 	private initialInitTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -559,6 +563,8 @@ export class GameProcess implements IGameProcess {
 	public properties: Map<string, Property> = new Map();
 	public chanceCardInfos: Map<string, ChanceCardInfo> = new Map();
 	public mapItems: Map<string, MapItem> = new Map();
+	/** 地图文件里各地块原本挂的事件，用于把运行时的动态挂载补发给刚进场的客户端 */
+	private staticMapEventIds: Map<string, string | undefined> = new Map();
 	public mapEvents: Map<string, RuntimeMapEvent> = new Map();
 
 	public gameRuntimeStack: GameRuntimeStack = new GameRuntimeStack();
@@ -1018,6 +1024,45 @@ export class GameProcess implements IGameProcess {
 			source: SocketMsgSource.Server,
 			data: { action: "unlink", mapEventId: previousEventId, mapItemId },
 		});
+	}
+
+	/**
+	 * 把「运行时动态挂上/摘掉的地图事件」补发给指定客户端（不传就是全体）。
+	 *
+	 * 客户端的地图是静态文件，格子上的事件图标只能靠 MapEventChanged 增量更新。
+	 * 而 game-inited 阶段的挂载（比如会游走的 COVID 初始落点）发生在 GameInit 之前，
+	 * 那时谁都还没进游戏页、监听器都没挂上，这条广播必然落空 —— 结果就是开局那只
+	 * COVID 在所有人棋盘上都是隐形的，非得等它被踩到搬一次家才画得出来。
+	 * 中途进来的旁观者、重连回来的玩家同理，都要在拿到 GameInit 之后补这一份。
+	 */
+	private broadcastDynamicMapEventLinks(userIdList?: string[]): void {
+		const send = (msg: ServerSocketMessage) => {
+			if (userIdList) sendToUsers(userIdList, msg);
+			else this.gameBroadcast(msg);
+		};
+
+		for (const [mapItemId, mapItem] of this.mapItems) {
+			const currentEventId = mapItem.mapEventId;
+			if (currentEventId === this.staticMapEventIds.get(mapItemId)) continue;
+
+			if (!currentEventId) {
+				send({
+					type: SocketMsgType.MapEventChanged,
+					source: SocketMsgSource.Server,
+					data: { action: "unlink", mapEventId: this.staticMapEventIds.get(mapItemId), mapItemId },
+				});
+				continue;
+			}
+
+			const mapEvent = this.mapEvents.get(currentEventId);
+			if (!mapEvent) continue;
+			const { fn: _fn, ...serializableEvent } = mapEvent;
+			send({
+				type: SocketMsgType.MapEventChanged,
+				source: SocketMsgSource.Server,
+				data: { action: "link", mapEventId: currentEventId, mapItemId, mapEvent: serializableEvent },
+			});
+		}
 	}
 
 	/**
@@ -1612,6 +1657,9 @@ export class GameProcess implements IGameProcess {
 				this.properties.set(property.id, new Property(property, this.mapData.extraLibs));
 			}
 			this.mapItems.set(mapItem.id, mapItem);
+			// 记下地图文件里的静态挂载，用来算出「运行时才挂上去的事件」——
+			// 客户端手上的地图是静态文件，这部分差异得单独补给它
+			this.staticMapEventIds.set(mapItem.id, mapItem.mapEventId);
 		});
 
 		chanceCards.forEach((chanceCard) => {
@@ -3326,10 +3374,17 @@ export class GameProcess implements IGameProcess {
 
 	public setInitSessionId(initSessionId: string): void { this.initSessionId = initSessionId; }
 
+	public setInitSpectatorIds(spectatorIds: string[]): void { this.initSpectatorIds = new Set(spectatorIds); }
+
 	private prepareInitialInitBarrier(): void {
 		this.initialInitBarrier.clear();
 		for (const player of this.players.values()) {
 			if (!player.isAI) this.initialInitBarrier.set(player.id, "pending");
+		}
+		// 旁观者不是玩家，但他也要把棋盘画出来才跟得上广播。不等他的话，全 AI 局会在他
+		// 加载模型期间就开跑，那段时间的走路/传送广播全部丢失，棋子位置从此永久偏移。
+		for (const spectatorId of this.initSpectatorIds) {
+			this.initialInitBarrier.set(spectatorId, "pending");
 		}
 	}
 
@@ -3342,7 +3397,10 @@ export class GameProcess implements IGameProcess {
 			this.initialInitResolve = resolve;
 			this.initialInitTimeout = setTimeout(() => {
 				for (const [userId, status] of this.initialInitBarrier) {
-					if (status === "pending") this.markInitialPlayerOffline(userId, "初始化确认超时");
+					if (status !== "pending") continue;
+					// 旁观者超时就不等了，直接开局：他不是玩家，没有「掉线转 AI 托管」这回事
+					if (this.initSpectatorIds.has(userId)) this.initialInitBarrier.set(userId, "ready");
+					else this.markInitialPlayerOffline(userId, "初始化确认超时");
 				}
 				this.resolveInitialBarrierIfComplete();
 			}, GameProcess.INIT_BARRIER_TIMEOUT);
@@ -3364,10 +3422,17 @@ export class GameProcess implements IGameProcess {
 				this.handlePlayerOffline(userId);
 			} else {
 				this.sendToPlayer(userId, { type: SocketMsgType.GameInitFinished, source: SocketMsgSource.Server, data: undefined, extra: { initSessionId: reconnect.sessionId } });
+				// 重连的人是按静态地图重建棋盘的，动态挂上去的事件图标要补一份
+				this.broadcastDynamicMapEventLinks([userId]);
 			}
 			return;
 		}
-		if (metadata?.initSessionId !== this.initSessionId || !this.initialInitBarrier.has(userId)) return;
+		if (metadata?.initSessionId !== this.initSessionId || !this.initialInitBarrier.has(userId)) {
+			// 不在屏障里的回执，基本就是中途进来的旁观者：他刚说自己把棋盘画完了，
+			// 这时候补动态事件图标才收得到（进场时那一份发得太早，监听器还没挂上）
+			this.broadcastDynamicMapEventLinks([userId]);
+			return;
+		}
 		if (metadata?.initStatus === "failed") {
 			this.initialInitBarrier.set(userId, "failed");
 			this.sendToPlayer(userId, { type: SocketMsgType.GameInitAborted, source: SocketMsgSource.Server, data: { initSessionId: this.initSessionId, reason: metadata.reason || "游戏初始化失败" } });
@@ -4008,6 +4073,9 @@ export class GameProcess implements IGameProcess {
 			// 步骤4: 等待客户端初始化完成
 			await this.waitInitFinished();
 
+			// 步骤4.5: 补发 game-inited 阶段挂上去的动态事件，那时客户端还没进游戏页，收不到
+			this.broadcastDynamicMapEventLinks();
+
 			// 在所有真人玩家完成初始化、失败或切换 AI 托管后才通知房主清除初始化超时。
 			self.postMessage(<WorkerCommMsg>{ type: WorkerCommType.GameProcessReady, data: undefined });
 
@@ -4303,6 +4371,7 @@ export class GameProcess implements IGameProcess {
 			source: SocketMsgSource.Server,
 			data: undefined,
 		});
+		this.broadcastDynamicMapEventLinks([userId]);
 	}
 
 	public createSnapshot(): SaveSnapshot {

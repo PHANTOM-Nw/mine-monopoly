@@ -115,7 +115,19 @@ export class GameRenderer {
 	>();
 	private arrivedEventIcons: Map<string, THREE.Mesh> = new Map<string, THREE.Mesh>(); // key = mapItemId
 	private playerPosition: Map<string, number> = new Map<string, number>();
-	private playerPendingWalks: Map<string, string> = new Map<string, string>(); // 防止同一玩家的走路动画并发执行
+	/**
+	 * 同一玩家移动动画的串行锁（走路 + 传送共用）。
+	 * 之前是用「pending 标记 + 50ms 轮询」等前一段动画，多段动画同时排队时会一起被放行，
+	 * 结果两段动画抢同一个模型，棋子最后停在错误的格子上。
+	 */
+	private playerMoveLocks: Map<string, Promise<void>> = new Map<string, Promise<void>>();
+	/** 排队中 + 播放中的移动动画数量，位置回正要等它归零才能落地，否则会打断正在走的棋子 */
+	private playerMoveJobs: Map<string, number> = new Map<string, number>();
+	/** 动画期间收到的服务端权威位置，等动画播完再回正 */
+	private pendingPositionReconcile: Map<string, number> = new Map<string, number>();
+	private positionReconcileTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+	/** 位置回正的等待窗口：GameData 常常比对应的动画广播早到，留点时间让动画自己接管 */
+	private static readonly POSITION_RECONCILE_DELAY = 800;
 	private requestAnimationFrameId: number = -1;
 
 	private playerWatchers: Map<
@@ -704,7 +716,10 @@ export class GameRenderer {
 					// 获取源玩家位置
 					const sourcePlayer = this.playerEntities.get(sourcePlayerId);
 					if (!sourcePlayer) {
+						// 动画放不了也要回执，否则游戏进程要空等满 6 秒超时才继续
 						console.warn("[机会卡动画] 找不到源玩家:", sourcePlayerId);
+						const monopolyClient = useMonopolyClient();
+						monopolyClient && monopolyClient.AnimationComplete(animationId);
 						continue;
 					}
 
@@ -1217,68 +1232,61 @@ export class GameRenderer {
 		useEventBus().on(
 			"player-walk",
 			async (walkPlayerId: string, step: number, walkId: string, totalSteps?: number, startStep?: number) => {
-				// 等待前一个动画完成，防止并发执行
-				const pendingWalk = this.playerPendingWalks.get(walkPlayerId);
-				if (pendingWalk) {
-					// 等待前一个动画完成
-					await new Promise<void>((resolve) => {
-						const checkPending = () => {
-							const currentPending = this.playerPendingWalks.get(walkPlayerId);
-							if (!currentPending) {
-								resolve();
-							} else {
-								// 继续等待，使用 setTimeout 避免阻塞
-								setTimeout(checkPending, 50);
-							}
-						};
-						checkPending();
+				// 同步登记，之后的 await 期间收到 GameData 也不会误判成「没有动画在跑」而抢着回正位置
+				this.addPlayerMoveJob(walkPlayerId);
+				try {
+					await this.runPlayerMoveExclusive(walkPlayerId, async () => {
+						const playerEntity = this.playerEntities.get(walkPlayerId);
+						// 实体缺失（场景重载中、破产清理后）时只能放弃这段动画，
+						// 但外层的回执必须照发：漏一次回执游戏进程就要空等一整个超时。
+						if (!playerEntity) {
+							console.warn("[渲染器] 走路动画找不到玩家实体，跳过本段动画:", walkPlayerId);
+							return;
+						}
+
+						// 起点丢了就退回服务端位置：PlayerWalk 是在游戏进程提交新位置之前发的，
+						// 此刻 GameData 里的 positionIndex 正好是这一段的起点。缺这层兜底会算出 NaN，
+						// 棋子会直接飞到坐标原点再也回不来。
+						const storedPosition = toRaw(this.playerPosition.get(walkPlayerId));
+						const sourcePosition = Number.isInteger(storedPosition)
+							? (storedPosition as number)
+							: (useGameData().getPlayerInfoById(walkPlayerId)?.positionIndex ?? 0);
+						const mapIndexLength = toRaw(mapDataStore.mapIndex.length);
+						const endIndex = (((sourcePosition + step) % mapIndexLength) + mapIndexLength) % mapIndexLength;
+
+						this.currentFocusModule = playerEntity.model;
+						// this.playerInRoundOutlinePass.selectedObjects = [playerEntity.model];
+						this.isLockingRole = true;
+						gsap.to(playerEntity.model.scale, {
+							x: Math.sign(playerEntity.model.scale.x),
+							y: Math.sign(playerEntity.model.scale.y),
+							z: Math.sign(playerEntity.model.scale.z),
+						});
+
+						try {
+							await this.updatePlayerPositionByStep(
+								walkPlayerId,
+								sourcePosition,
+								step,
+								mapIndexLength,
+								totalSteps ?? Math.abs(step), // 向后兼容：如果没有提供 totalSteps，使用当前步数
+								startStep ?? 1, // 向后兼容：如果没有提供 startStep，从第1步开始
+							);
+						} finally {
+							this.currentFocusModule = null;
+							this.isLockingRole = false;
+
+							// 更新 playerPosition Map，确保下一段走路从正确位置开始
+							this.playerPosition.set(walkPlayerId, endIndex);
+
+							// 拆散重叠的玩家模型
+							this.breakUpPlayersInSameMapItem();
+						}
 					});
-				}
-
-				// 标记动画开始
-				this.playerPendingWalks.set(walkPlayerId, walkId);
-
-				const playerEntity = this.playerEntities.get(walkPlayerId);
-				if (playerEntity) {
-					const sourcePosition = toRaw(this.playerPosition.get(walkPlayerId)) as number;
-					const mapIndexLength = toRaw(mapDataStore.mapIndex.length);
-					const endIndex = (((sourcePosition + step) % mapIndexLength) + mapIndexLength) % mapIndexLength;
-
-					const model = this.playerEntities.get(walkPlayerId)?.model;
-					if (model) {
-						this.currentFocusModule = model;
-						// this.playerInRoundOutlinePass.selectedObjects = [model];
-					}
-					this.isLockingRole = true;
-					gsap.to(playerEntity.model.scale, {
-						x: Math.sign(playerEntity.model.scale.x),
-						y: Math.sign(playerEntity.model.scale.y),
-						z: Math.sign(playerEntity.model.scale.z),
-					});
-
-					try {
-						await this.updatePlayerPositionByStep(
-							walkPlayerId,
-							sourcePosition,
-							step,
-							mapIndexLength,
-							totalSteps ?? Math.abs(step), // 向后兼容：如果没有提供 totalSteps，使用当前步数
-							startStep ?? 1, // 向后兼容：如果没有提供 startStep，从第1步开始
-						);
-					} finally {
-						this.playerPendingWalks.delete(walkPlayerId);
-					}
-
-					this.currentFocusModule = null;
-					this.isLockingRole = false;
-
-					// 更新 playerPosition Map，确保下一段走路从正确位置开始
-					this.playerPosition.set(walkPlayerId, endIndex);
-
-					// 拆散重叠的玩家模型
-					this.breakUpPlayersInSameMapItem();
+				} finally {
 					const monopolyClient = useMonopolyClient();
 					monopolyClient && monopolyClient.AnimationComplete(walkId);
+					this.finishPlayerMoveJob(walkPlayerId);
 				}
 			},
 		);
@@ -1288,81 +1296,16 @@ export class GameRenderer {
 			walkId: string,
 			viaMapItemIds?: string[],
 		) => {
-			const playerEntity = this.getPlayerEntity(tpPlayerId);
-
-			if (playerEntity) {
-				const model = playerEntity.model;
-				const body = playerEntity.bodyMesh; // 获取 bodyMesh
-
-				this.currentFocusModule = model;
-				this.isLockingRole = true;
-
-				if (!body) return;
-				// 1. 记录原始朝向
-				const originalDir = Math.sign(body.scale.x) || 1;
-
-				// 途经点：地图可以给 tp 传一串地块，让棋子沿着它们飞过去而不是原地闪现。
-				// 这些地块不在 mapIndex 里（引擎的移动是单环模型，没有分支），
-				// 所以纯粹是演出 —— 不触发事件、不计步数，逻辑上依旧是一次传送。
-				const via = (viaMapItemIds ?? [])
-					.map((id) => this.mapItemsInScene.get(id))
-					.filter((item): item is THREE.Group => !!item);
-				const mapItem = this.getMapItem(positionIndex);
-
-				if (via.length) {
-					const FLY_HEIGHT = 0.55;
-					// 先抬起来，再一格格掠过，最后落地
-					for (let i = 0; i < via.length; i++) {
-						const item = via[i]!;
-						await gsap.to(model.position, {
-							x: item.position.x,
-							y: this.getMapItemSurfaceHeight(item) + FLY_HEIGHT,
-							z: item.position.z,
-							// 第一跳是起飞，慢一点；之后匀速掠过
-							duration: i === 0 ? 0.32 : 0.16,
-							ease: i === 0 ? "power2.out" : "none",
-						});
-					}
-					if (mapItem) {
-						await gsap.to(model.position, {
-							x: mapItem.position.x,
-							y: this.getMapItemSurfaceHeight(mapItem),
-							z: mapItem.position.z,
-							duration: 0.34,
-							ease: "power2.in",
-						});
-					}
-					this.playerPosition.set(tpPlayerId, positionIndex);
-				} else {
-					// 2. 消失动画
-					await gsap.to(body.scale, {
-						x: 0,
-						duration: 0.5,
-						ease: "back.in(1.7)",
-					});
-
-					// 3. 执行位移 (瞬间) - 修复高度问题
-					if (mapItem) {
-						const { x, z } = mapItem.position;
-						const surfaceY = this.getMapItemSurfaceHeight(mapItem);
-						model.position.set(x, surfaceY, z);
-					}
-					this.playerPosition.set(tpPlayerId, positionIndex);
-
-					// 4. 出现动画
-					await gsap.to(body.scale, {
-						x: originalDir,
-						duration: 0.5,
-						delay: 0.1,
-						ease: "back.out(1.7)",
-					});
-				}
-
-				this.currentFocusModule = null;
-				this.isLockingRole = false;
-				this.breakUpPlayersInSameMapItem();
+			this.addPlayerMoveJob(tpPlayerId);
+			try {
+				// 传送和走路共用同一把锁，避免同一个棋子被两段动画同时拖着走
+				await this.runPlayerMoveExclusive(tpPlayerId, () =>
+					this.playPlayerTpAnimation(tpPlayerId, positionIndex, viaMapItemIds),
+				);
+			} finally {
 				const monopolyClient = useMonopolyClient();
 				monopolyClient && monopolyClient.AnimationComplete(walkId);
+				this.finishPlayerMoveJob(tpPlayerId);
 			}
 		});
 
@@ -1496,6 +1439,7 @@ export class GameRenderer {
 			watchers.bankruptWatcher && watchers.bankruptWatcher();
 		});
 		useEventBus().removeAll();
+		this.clearAllPositionReconcile();
 		this.commonWatchers.forEach((f) => f());
 		this.clearAllSpeechBubbles();
 		this.clearAllThinkingMarkers();
@@ -1787,6 +1731,186 @@ export class GameRenderer {
 		});
 	}
 
+	/**
+	 * 传送动画。实体缺失时直接跳过，位置由 GameData 回正兜底。
+	 */
+	private async playPlayerTpAnimation(tpPlayerId: string, positionIndex: number, viaMapItemIds?: string[]) {
+		const playerEntity = this.getPlayerEntity(tpPlayerId);
+		if (!playerEntity) {
+			console.warn("[渲染器] 传送动画找不到玩家实体，跳过本次动画:", tpPlayerId);
+			return;
+		}
+
+		const model = playerEntity.model;
+		const body = playerEntity.bodyMesh; // 获取 bodyMesh
+		const mapItem = this.getMapItem(positionIndex);
+
+		this.currentFocusModule = model;
+		this.isLockingRole = true;
+
+		try {
+			// 途经点：地图可以给 tp 传一串地块，让棋子沿着它们飞过去而不是原地闪现。
+			// 这些地块不在 mapIndex 里（引擎的移动是单环模型，没有分支），
+			// 所以纯粹是演出 —— 不触发事件、不计步数，逻辑上依旧是一次传送。
+			const via = (viaMapItemIds ?? [])
+				.map((id) => this.mapItemsInScene.get(id))
+				.filter((item): item is THREE.Group => !!item);
+
+			if (via.length) {
+				const FLY_HEIGHT = 0.55;
+				// 先抬起来，再一格格掠过，最后落地
+				for (let i = 0; i < via.length; i++) {
+					const item = via[i]!;
+					await gsap.to(model.position, {
+						x: item.position.x,
+						y: this.getMapItemSurfaceHeight(item) + FLY_HEIGHT,
+						z: item.position.z,
+						// 第一跳是起飞，慢一点；之后匀速掠过
+						duration: i === 0 ? 0.32 : 0.16,
+						ease: i === 0 ? "power2.out" : "none",
+					});
+				}
+				if (mapItem) {
+					await gsap.to(model.position, {
+						x: mapItem.position.x,
+						y: this.getMapItemSurfaceHeight(mapItem),
+						z: mapItem.position.z,
+						duration: 0.34,
+						ease: "power2.in",
+					});
+				}
+			} else if (body) {
+				// 1. 记录原始朝向
+				const originalDir = Math.sign(body.scale.x) || 1;
+
+				// 2. 消失动画
+				await gsap.to(body.scale, {
+					x: 0,
+					duration: 0.5,
+					ease: "back.in(1.7)",
+				});
+
+				// 3. 执行位移 (瞬间) - 修复高度问题
+				if (mapItem) this.placeModelOnMapItem(model, mapItem);
+
+				// 4. 出现动画
+				await gsap.to(body.scale, {
+					x: originalDir,
+					duration: 0.5,
+					delay: 0.1,
+					ease: "back.out(1.7)",
+				});
+			} else if (mapItem) {
+				// 没有 bodyMesh 就做不了缩放特效，至少要落到正确的格子上
+				this.placeModelOnMapItem(model, mapItem);
+			}
+
+			this.playerPosition.set(tpPlayerId, positionIndex);
+		} finally {
+			this.currentFocusModule = null;
+			this.isLockingRole = false;
+			this.breakUpPlayersInSameMapItem();
+		}
+	}
+
+	private placeModelOnMapItem(model: THREE.Object3D, mapItem: THREE.Object3D) {
+		const { x, z } = mapItem.position;
+		model.position.set(x, this.getMapItemSurfaceHeight(mapItem), z);
+	}
+
+	/** 登记一个排队中的移动动画（收到广播时同步调用，不能等到动画真正开播） */
+	private addPlayerMoveJob(playerId: string) {
+		this.playerMoveJobs.set(playerId, (this.playerMoveJobs.get(playerId) ?? 0) + 1);
+		this.clearPositionReconcileTimer(playerId);
+	}
+
+	private finishPlayerMoveJob(playerId: string) {
+		const rest = (this.playerMoveJobs.get(playerId) ?? 1) - 1;
+		if (rest > 0) {
+			this.playerMoveJobs.set(playerId, rest);
+			return;
+		}
+		this.playerMoveJobs.delete(playerId);
+		this.schedulePositionReconcile(playerId);
+	}
+
+	/**
+	 * 同一个玩家的移动动画串行执行：必须在收到广播时同步调用，才能保住先来后到的顺序，
+	 * 也保证走路和传送不会同时拖着同一个模型走。
+	 */
+	private runPlayerMoveExclusive(playerId: string, task: () => Promise<void>): Promise<void> {
+		const previous = this.playerMoveLocks.get(playerId) ?? Promise.resolve();
+		const current = previous.then(() =>
+			task().catch((error) => {
+				console.error("[渲染器] 移动动画执行失败:", playerId, error);
+			}),
+		);
+		this.playerMoveLocks.set(playerId, current);
+		void current.then(() => {
+			if (this.playerMoveLocks.get(playerId) === current) this.playerMoveLocks.delete(playerId);
+		});
+		return current;
+	}
+
+	/**
+	 * 服务端下发的 positionIndex 是权威位置。渲染端的棋子位置是靠 PlayerWalk 里的「相对步数」
+	 * 一段段累出来的，只要漏掉一条移动广播（旁观者还在加载模型时游戏就开跑、切后台重载场景、
+	 * 玩家实体尚未创建），棋子就会永久停在错误的格子上，而且之后越走越偏。这里按 GameData 把它拽回来。
+	 */
+	private reconcilePlayerPosition(playerId: string, targetIndex: number) {
+		if (!Number.isInteger(targetIndex)) return;
+		this.pendingPositionReconcile.set(playerId, targetIndex);
+		this.schedulePositionReconcile(playerId);
+	}
+
+	/**
+	 * 延后回正：GameData 经常比对应的动画广播早到一步（传送就是先改位置再发动画），
+	 * 立刻纠正会把动画抢掉。等一小会儿，期间只要有移动动画进来就交给动画自己走。
+	 */
+	private schedulePositionReconcile(playerId: string) {
+		this.clearPositionReconcileTimer(playerId);
+		if (!this.pendingPositionReconcile.has(playerId)) return;
+		if (this.playerMoveJobs.has(playerId)) return; // 动画排队中，等它播完再排
+		const timer = setTimeout(() => {
+			this.positionReconcileTimers.delete(playerId);
+			this.applyPositionReconcile(playerId);
+		}, GameRenderer.POSITION_RECONCILE_DELAY);
+		this.positionReconcileTimers.set(playerId, timer);
+	}
+
+	private applyPositionReconcile(playerId: string) {
+		const targetIndex = this.pendingPositionReconcile.get(playerId);
+		if (targetIndex === undefined) return;
+		if (this.playerMoveJobs.has(playerId)) return; // 动画又来了，等 finishPlayerMoveJob 重排
+		this.pendingPositionReconcile.delete(playerId);
+
+		const playerEntity = this.playerEntities.get(playerId);
+		if (!playerEntity) return; // 模型还没加载好，initPlayer 会按 GameData 落位
+		if (this.playerPosition.get(playerId) === targetIndex) return;
+		const mapItem = this.getMapItem(targetIndex);
+		if (!mapItem) return;
+
+		console.warn(
+			`[渲染器] 玩家 ${playerId} 的显示位置(${this.playerPosition.get(playerId)})与服务端(${targetIndex})不一致，已回正`,
+		);
+		this.placeModelOnMapItem(playerEntity.model, mapItem);
+		this.playerPosition.set(playerId, targetIndex);
+		this.breakUpPlayersInSameMapItem();
+	}
+
+	private clearPositionReconcileTimer(playerId: string) {
+		const timer = this.positionReconcileTimers.get(playerId);
+		if (timer === undefined) return;
+		clearTimeout(timer);
+		this.positionReconcileTimers.delete(playerId);
+	}
+
+	private clearAllPositionReconcile() {
+		this.positionReconcileTimers.forEach((timer) => clearTimeout(timer));
+		this.positionReconcileTimers.clear();
+		this.pendingPositionReconcile.clear();
+	}
+
 	private async updatePlayerPositionByStep(
 		playerId: string,
 		sourceIndex: number,
@@ -1988,7 +2112,9 @@ export class GameRenderer {
 	 */
 	public async reloadScene() {
 		// 1. 取消所有动画
-		this.playerPendingWalks.clear();
+		this.playerMoveLocks.clear();
+		this.playerMoveJobs.clear();
+		this.clearAllPositionReconcile();
 		this.clearAllThinkingMarkers();
 
 		// 2. 清空场景动态对象
@@ -2026,7 +2152,9 @@ export class GameRenderer {
 
 		this.clearSpeechBubble(playerId);
 		this.clearThinkingMarker(playerId);
-		this.playerPendingWalks.delete(playerId);
+		this.playerMoveJobs.delete(playerId);
+		this.clearPositionReconcileTimer(playerId);
+		this.pendingPositionReconcile.delete(playerId);
 		this.playerPosition.delete(playerId);
 		if (this.currentFocusModule === playerEntity.model) {
 			this.currentFocusModule = null;
@@ -2037,16 +2165,17 @@ export class GameRenderer {
 	}
 
 	private updatePlayerPosition(playerInfo: PlayerInfo) {
-		const mapItem = this.getMapItem(playerInfo.positionIndex);
+		const positionIndex = toRaw(playerInfo.positionIndex);
+		const mapItem = this.getMapItem(positionIndex);
 		if (!mapItem) return;
-
-		const surfaceY = this.getMapItemSurfaceHeight(mapItem);
-		const { x, z } = mapItem.position;
 
 		const player = this.playerEntities.get(playerInfo.id);
 		if (!player) return;
 		// 使用动态高度
-		player.model.position.set(x, surfaceY, z);
+		this.placeModelOnMapItem(player.model, mapItem);
+		// 模型加载是异步的，loadPlayersModules 里记下的位置可能已经过期，这里按落位的格子对齐，
+		// 否则后续走路会从一个错误的起点累加
+		this.playerPosition.set(playerInfo.id, positionIndex);
 	}
 
 	private getMapItemPosition(index: number) {

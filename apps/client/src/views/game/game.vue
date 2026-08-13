@@ -124,15 +124,19 @@
 			// 恢复心跳检测
 			socketClient.resumeHeartBeat();
 
+			// 旁观者也要回执：开局旁观时游戏进程要等他把棋盘画出来才能开跑，
+			// 否则（尤其是全 AI 局）走路广播会在他加载模型期间全部丢掉，棋子位置从此对不上。
+			// 中途进来的旁观者拿到的 GameInit 没有 initSessionId，这条回执会被游戏进程忽略，无副作用。
 			useEventBus().on("game:init", () => {
-				if (!amISpectator.value) void socketClient.gameInitFinished();
+				void socketClient.gameInitFinished();
 			});
 
+			socketClient.gameInitFinished();
 			if (amISpectator.value) {
+				// 中途进来的旁观者早就收到过 GameInitFinished，这里不能再挂等待遮罩，否则会一直遮着
 				useLoading().hideLoading();
 			} else {
 				useLoading().showLoading("数据加载完成，等待其他玩家加载...");
-				socketClient.gameInitFinished();
 			}
 
 			// 监听玩家金钱变化事件
