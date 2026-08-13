@@ -43,6 +43,8 @@ export const enum SocketMsgType {
 	UI = "UI", //在客户端增添UI
 	/** 表单对话框 */
 	FormDialog = "FormDialog",
+	/** 关掉客户端上还开着的 dialog（托管期间 AI 替玩家做完决定后收摊） */
+	DialogDismiss = "DialogDismiss",
 	/** Loading 控制 */
 	LoadingControl = "LoadingControl",
 	/** 按钮注册 */

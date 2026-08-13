@@ -2,6 +2,7 @@ import { createVNode, render, type AppContext, type VNode, getCurrentInstance } 
 import FPMessageBoxVue from "./fp-message-box.vue";
 import useEventBus from "@src/utils/event-bus"; // 假设你还需要它
 import { GameEventType, UISchema, FormSchema } from "@mine-monopoly/types"; // 假设你还需要它
+import { onDialogDismiss, DialogDismissedError } from "../dialog-session";
 
 /**
  * 用户取消操作时抛出的错误
@@ -32,6 +33,14 @@ export interface MessageBoxOptions {
 	cancelText?: string;
 	appContext?: AppContext;
 	showCancel?: boolean;
+	/** 弹窗会话 ID，服务端靠它把这个弹窗收掉 */
+	dialogId?: string;
+	/** 这次由 AI 托管作答，弹窗只做展示 */
+	aiControlled?: boolean;
+	/** 玩家在弹窗里点了「收回控制权」 */
+	onTakeover?: () => void;
+	/** 玩家在弹窗里点了「交还给 AI」 */
+	onResumeai?: () => void;
 	[key: string]: any;
 }
 
@@ -44,12 +53,20 @@ export function FPMessageBox(options: MessageBoxOptions) {
 		const container = document.createElement("div");
 
 		// 2. 销毁逻辑
+		let offDialogDismiss = () => {};
 		const destroy = () => {
 			useEventBus().remove(GameEventType.TimeOut, handleTimeout);
+			offDialogDismiss();
 			// 等待 Dialog 动画结束(约300ms)后再销毁，避免弹窗突然消失
 			setTimeout(() => {
 				render(null, container);
 			}, 350);
+		};
+
+		// 服务端把这次弹窗收掉（例如托管中的 AI 已经替玩家作答）
+		const handleDismiss = () => {
+			reject(new DialogDismissedError());
+			destroy();
 		};
 
 		const handleConfirm = (formData?: any) => {
@@ -104,5 +121,6 @@ export function FPMessageBox(options: MessageBoxOptions) {
 
 		// 8. 注册事件总线监听
 		useEventBus().once(GameEventType.TimeOut, handleTimeout);
+		offDialogDismiss = onDialogDismiss(options.dialogId, handleDismiss);
 	});
 }

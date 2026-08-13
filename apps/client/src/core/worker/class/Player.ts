@@ -300,6 +300,17 @@ export class Player implements IPlayer {
 		return wasThinking && !this.isAIThinking();
 	}
 
+	/**
+	 * 直接把「AI 思考中」的标记清零。
+	 * 玩家收回控制权时用：在飞的那次决策结果已经作废了，
+	 * 头顶的思考气泡不能挂到模型慢悠悠返回为止。
+	 */
+	public clearAIThinking(): boolean {
+		const wasThinking = this.isAIThinking();
+		this.aiThinkingRequestCount = 0;
+		return wasThinking;
+	}
+
 	public getCardById(id: string) {
 		const index = this.chanceCards.findIndex((card) => card.getId() === id);
 		return this.chanceCards[index] || undefined;
