@@ -489,6 +489,8 @@ jobs:
           NGINX_INCLUDE_FILE='${{ vars.NGINX_INCLUDE_FILE }}'
 
           MONOPOLY_DOMAIN='${{ vars.MONOPOLY_DOMAIN }}'
+          # remote-apply.sh 的本机自检要按它决定打 http 还是 https
+          PROTOCOL='${{ vars.PROTOCOL }}'
           BIND_ADDRESS='${{ vars.BIND_ADDRESS || '127.0.0.1' }}'
           SERVER_PORT='${{ vars.SERVER_PORT }}'
           ICE_SERVER_PORT='${{ vars.ICE_SERVER_PORT }}'

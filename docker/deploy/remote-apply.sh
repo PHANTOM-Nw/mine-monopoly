@@ -34,6 +34,9 @@ source ./deploy.conf
 : "${SERVER_IMAGE:?deploy.conf 缺少 SERVER_IMAGE}"
 : "${IMAGE_REPO:?deploy.conf 缺少 IMAGE_REPO}"
 : "${BIND_ADDRESS:=127.0.0.1}"
+# 自检走 http 还是 https。https 部署时域名的 80 通常会 301 到 443，
+# 继续用 http 打自检会拿到 301 而不是 200，把好好的部署判成失败。
+: "${PROTOCOL:=http}"
 : "${DEPLOY_WEB:=false}"
 : "${UPDATE_NGINX:=true}"
 : "${GHCR_PERSIST_LOGIN:=false}"
@@ -263,16 +266,22 @@ smoke_test() {
     fi
   }
 
-  # 走 nginx 时必须带上 Host —— nginx 上有多个 server 块，用 127.0.0.1 当 Host
-  # 会落到 server_name _ 的默认站点上，拿到的 404 是假故障。
+  # 走 nginx 时必须命中正确的 server 块 —— nginx 上有多个站点，用 127.0.0.1 当
+  # Host 会落到 server_name _ 的默认站点上，拿到的 404 是假故障。
+  #
+  # 用 --resolve 而不是 -H "Host:"：https 下 TLS 的 SNI 和证书校验都看真实主机名，
+  # 光改 Host 头握手就过不去。--resolve 把域名钉在 127.0.0.1 上，既走了完整的 TLS
+  # 链路，又不出公网、不依赖云安全组。
   probe_nginx() {
-    local label="$1" path="$2" expect="$3" code
+    local label="$1" path="$2" expect="$3" code url port
+    if [ "$PROTOCOL" = "https" ]; then port=443; else port=80; fi
+    url="${PROTOCOL}://${MONOPOLY_DOMAIN}${path}"
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-      -H "Host: ${MONOPOLY_DOMAIN}" "http://127.0.0.1${path}" || echo 000)"
+      --resolve "${MONOPOLY_DOMAIN}:${port}:127.0.0.1" "$url" || echo 000)"
     if [ "$code" = "$expect" ]; then
-      printf '  \033[32mok\033[0m   %-22s Host:%s%s -> %s\n' "$label" "$MONOPOLY_DOMAIN" "$path" "$code"
+      printf '  \033[32mok\033[0m   %-22s %s -> %s\n' "$label" "$url" "$code"
     else
-      printf '  \033[31mFAIL\033[0m %-22s Host:%s%s -> %s (期望 %s)\n' "$label" "$MONOPOLY_DOMAIN" "$path" "$code" "$expect"
+      printf '  \033[31mFAIL\033[0m %-22s %s -> %s (期望 %s)\n' "$label" "$url" "$code" "$expect"
       fail=1
     fi
   }
