@@ -1242,14 +1242,6 @@ export class GameRenderer {
 				this.addPlayerMoveJob(walkPlayerId);
 				try {
 					await this.runPlayerMoveExclusive(walkPlayerId, async () => {
-						const playerEntity = this.playerEntities.get(walkPlayerId);
-						// 实体缺失（场景重载中、破产清理后）时只能放弃这段动画，
-						// 但外层的回执必须照发：漏一次回执游戏进程就要空等一整个超时。
-						if (!playerEntity) {
-							console.warn("[渲染器] 走路动画找不到玩家实体，跳过本段动画:", walkPlayerId);
-							return;
-						}
-
 						// 起点丢了就退回服务端位置：PlayerWalk 是在游戏进程提交新位置之前发的，
 						// 此刻 GameData 里的 positionIndex 正好是这一段的起点。缺这层兜底会算出 NaN，
 						// 棋子会直接飞到坐标原点再也回不来。
@@ -1259,6 +1251,17 @@ export class GameRenderer {
 							: (useGameData().getPlayerInfoById(walkPlayerId)?.positionIndex ?? 0);
 						const mapIndexLength = toRaw(mapDataStore.mapIndex.length);
 						const endIndex = (((sourcePosition + step) % mapIndexLength) + mapIndexLength) % mapIndexLength;
+
+						const playerEntity = this.playerEntities.get(walkPlayerId);
+						// 实体缺失（场景重载中、破产清理后）时只能放弃这段动画，
+						// 但外层的回执必须照发：漏一次回执游戏进程就要空等一整个超时。
+						// 落点仍然要记下来 —— 走路广播只带相对步数，这一段不记账，
+						// 后面每一段都会从错误的起点接着累加，棋子从此永久偏移。
+						if (!playerEntity) {
+							console.warn("[渲染器] 走路动画找不到玩家实体，跳过本段动画:", walkPlayerId);
+							this.commitPlayerPosition(walkPlayerId, endIndex);
+							return;
+						}
 
 						this.currentFocusModule = playerEntity.model;
 						// this.playerInRoundOutlinePass.selectedObjects = [playerEntity.model];
@@ -1283,7 +1286,7 @@ export class GameRenderer {
 							this.isLockingRole = false;
 
 							// 更新 playerPosition Map，确保下一段走路从正确位置开始
-							this.playerPosition.set(walkPlayerId, endIndex);
+							this.commitPlayerPosition(walkPlayerId, endIndex);
 
 							// 拆散重叠的玩家模型
 							this.breakUpPlayersInSameMapItem();
@@ -1743,7 +1746,9 @@ export class GameRenderer {
 	private async playPlayerTpAnimation(tpPlayerId: string, positionIndex: number, viaMapItemIds?: string[]) {
 		const playerEntity = this.getPlayerEntity(tpPlayerId);
 		if (!playerEntity) {
+			// 动画放弃了，位置账还是要记：不记的话后续走路会从传送前的老格子接着累加
 			console.warn("[渲染器] 传送动画找不到玩家实体，跳过本次动画:", tpPlayerId);
+			this.commitPlayerPosition(tpPlayerId, positionIndex);
 			return;
 		}
 
@@ -1811,7 +1816,7 @@ export class GameRenderer {
 				this.placeModelOnMapItem(model, mapItem);
 			}
 
-			this.playerPosition.set(tpPlayerId, positionIndex);
+			this.commitPlayerPosition(tpPlayerId, positionIndex);
 		} finally {
 			this.currentFocusModule = null;
 			this.isLockingRole = false;
@@ -1822,6 +1827,19 @@ export class GameRenderer {
 	private placeModelOnMapItem(model: THREE.Object3D, mapItem: THREE.Object3D) {
 		const { x, z } = mapItem.position;
 		model.position.set(x, this.getMapItemSurfaceHeight(mapItem), z);
+	}
+
+	/**
+	 * 记录棋子的落点。走路广播只带相对步数，渲染端的位置全靠这本账一段段累出来，
+	 * 所以每一段都必须记 —— 哪怕动画本身被跳过了。
+	 *
+	 * 唯一不记的情况是玩家已经破产：破产清理会把实体和位置一起摘掉，
+	 * 这时候再写回去就成了幽灵位置，breakUpPlayersInSameMapItem 按 GameData 的
+	 * 玩家名单分组时它会占掉一个圆周槽位，把还活着的棋子挤偏格心。
+	 */
+	private commitPlayerPosition(playerId: string, positionIndex: number) {
+		if (useGameData().getPlayerInfoById(playerId)?.isBankrupted) return;
+		this.playerPosition.set(playerId, positionIndex);
 	}
 
 	/** 登记一个排队中的移动动画（收到广播时同步调用，不能等到动画真正开播） */
