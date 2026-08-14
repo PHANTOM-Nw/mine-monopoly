@@ -550,23 +550,18 @@ export class Room {
 		});
 	}
 
+	/**
+	 * 把 reason 翻成一句人话发到房间聊天里。
+	 *
+	 * 这里原来挂着一整排 reason 码（confirm_score_not_good_enough、no_card_good_enough
+	 * 之类），那是早先本地评分 AI 留下的，那套 provider 早就删干净了，全仓库再没有
+	 * 任何地方产出它们 —— 留着只会让人以为「默认还有个保守 AI 在做决策」。
+	 * 现在决策层只剩远程模型，reason 要么是模型自己写的自然语言，要么是本地兜底
+	 * 策略打的 local_fallback_* 码（那条路在 worker 里落地，走不到这里），
+	 * 所以这里只保留「自然语言就播，机器码就闭嘴」这一条规矩。
+	 */
 	private humanizeAIReason(reason?: string): string | undefined {
 		if (!reason) return undefined;
-		const knownReasonMap: Record<string, string> = {
-			no_available_option: "这步先没必要动",
-			fallback_first_option: "我先走个稳的",
-			confirm_score_not_good_enough: "现在接这个不太赚",
-			cancel_empty_selectable: "眼下没合适的目标",
-			cancel_low_value_options: "这些选择都一般",
-			missing_submit_option: "这一步条件还不太够",
-			cancel_form: "这一步先不急着交",
-			no_button_good_enough: "还没到值得按的时候",
-			no_card_available: "手里暂时没合适的牌",
-			no_card_good_enough: "这张牌现在打出去有点亏",
-		};
-		if (knownReasonMap[reason]) {
-			return knownReasonMap[reason];
-		}
 		if (/^[a-z0-9_:-]+$/i.test(reason)) {
 			return undefined;
 		}
