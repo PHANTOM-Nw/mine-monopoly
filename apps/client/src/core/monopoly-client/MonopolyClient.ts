@@ -276,6 +276,25 @@ export class MonopolyClient {
 		utilStore.endAnimation();
 	}
 
+	/**
+	 * 告诉游戏进程「我这边没有渲染器，这段动画放弃了」。
+	 * 不能直接发 AnimationComplete：动画等待是「谁先回谁算数」，一个还在加载的客户端
+	 * 秒回就会替全场结束等待，别人的棋子还在半路上，游戏进程却已经跑到下一步了。
+	 */
+	public AnimationSkipped(animationId: string) {
+		this.sendMsg({
+			type: SocketMsgType.Operation,
+			source: SocketMsgSource.Client,
+			data: {
+				operateType: OperateType.AnimationSkipped,
+				data: animationId,
+			},
+		});
+
+		const utilStore = useUtil();
+		utilStore.endAnimation();
+	}
+
 	public async sendMsg(msg: ClientSocketMessage): Promise<SessionSendResult> {
 		const result = this.session.send(msg);
 		if (!result.ok) console.warn("[MonopolyClient] 消息未发送", msg.type, result.reason);

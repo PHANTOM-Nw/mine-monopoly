@@ -594,20 +594,25 @@ const handleUsedChanceCard: ServerMessageHandler<SocketMsgType.UseChanceCard> = 
 /**
  * 渲染器还没挂上监听（旁观者进场时游戏已经在跑、场景重载中）时，动画广播会掉在地上，
  * 回执自然也发不出去，游戏进程只能一路空等超时 —— 这是旁观视角「延迟很大」的主因。
- * 这种情况下立刻补一条回执，位置由 GameData 回正兜底。
+ *
+ * 这里上报的是「我放弃了」而不是「我播完了」：动画等待是「谁先回谁算数」，
+ * 拿 AnimationComplete 顶上去的话，一个还在加载的客户端就能替全场结束等待，
+ * 别人的棋子还在半路上、游戏进程已经跑到下一步了 —— 视觉和实际从此错开。
+ * 游戏进程会把这种客户端从等待名单里剔掉，而不是当成完成。
+ * 本地位置由 GameData 回正兜底。
  */
 const ackAnimationIfNoRenderer = (eventName: string, animationId: string, client: MonopolyClient): boolean => {
 	if (useEventBus().getListeners(eventName) > 0) return false;
-	console.warn(`[动画] 渲染器未就绪，直接回执 ${eventName}:`, animationId);
-	client.AnimationComplete(animationId);
+	console.warn(`[动画] 渲染器未就绪，放弃 ${eventName}:`, animationId);
+	client.AnimationSkipped(animationId);
 	return true;
 };
 
 const handlePlayerWalk: ServerMessageHandler<SocketMsgType.PlayerWalk> = (msg, client) => {
 	if (!msg.data) return;
-	const { playerId, step, walkId, totalSteps, startStep } = msg.data;
+	const { playerId, step, walkId, sourceIndex, targetIndex, totalSteps, startStep } = msg.data;
 	if (ackAnimationIfNoRenderer("player-walk", walkId, client)) return;
-	useEventBus().emit("player-walk", playerId, step, walkId, totalSteps, startStep);
+	useEventBus().emit("player-walk", playerId, step, walkId, totalSteps, startStep, sourceIndex, targetIndex);
 };
 
 const handlePlayerTp: ServerMessageHandler<SocketMsgType.PlayerTp> = (msg, client) => {
