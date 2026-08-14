@@ -508,6 +508,14 @@ export interface SocketMessageDataType {
 			step: number;
 			/** 行走 ID */
 			walkId: string;
+			/**
+			 * 这一段的绝对起点格子下标。
+			 * 光发相对步数的话，渲染端只能拿自己那本账一段段累出来，漏一段就永久偏移、越走越偏；
+			 * 带上绝对起点，每一段都能自己对齐，不再依赖前面所有段都收到过。
+			 */
+			sourceIndex?: number;
+			/** 这一段的绝对落点格子下标（= normalize(sourceIndex + step)） */
+			targetIndex?: number;
 			/** 总移动步数（用于分段走路时的步数显示） */
 			totalSteps?: number;
 			/** 当前是第几步（用于分段走路时的步数显示） */

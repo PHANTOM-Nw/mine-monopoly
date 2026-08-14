@@ -605,9 +605,9 @@ const ackAnimationIfNoRenderer = (eventName: string, animationId: string, client
 
 const handlePlayerWalk: ServerMessageHandler<SocketMsgType.PlayerWalk> = (msg, client) => {
 	if (!msg.data) return;
-	const { playerId, step, walkId, totalSteps, startStep } = msg.data;
+	const { playerId, step, walkId, sourceIndex, targetIndex, totalSteps, startStep } = msg.data;
 	if (ackAnimationIfNoRenderer("player-walk", walkId, client)) return;
-	useEventBus().emit("player-walk", playerId, step, walkId, totalSteps, startStep);
+	useEventBus().emit("player-walk", playerId, step, walkId, totalSteps, startStep, sourceIndex, targetIndex);
 };
 
 const handlePlayerTp: ServerMessageHandler<SocketMsgType.PlayerTp> = (msg, client) => {

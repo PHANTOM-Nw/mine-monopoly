@@ -2388,6 +2388,9 @@ export class GameProcess implements IGameProcess {
 				playerId: player.id,
 				step: steps,
 				walkId,
+				// 绝对起点/落点：渲染端不再靠自己累加相对步数，漏掉一段也不会永久偏移
+				sourceIndex,
+				targetIndex,
 				totalSteps, // 传递总步数用于显示
 				startStep: currentStep, // 传递当前步数用于显示
 			},

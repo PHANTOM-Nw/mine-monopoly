@@ -1244,21 +1244,35 @@ export class GameRenderer {
 
 		useEventBus().on(
 			"player-walk",
-			async (walkPlayerId: string, step: number, walkId: string, totalSteps?: number, startStep?: number) => {
+			async (
+				walkPlayerId: string,
+				step: number,
+				walkId: string,
+				totalSteps?: number,
+				startStep?: number,
+				sourceIndex?: number,
+				targetIndex?: number,
+			) => {
 				const generation = this.sceneGeneration;
 				// 同步登记，之后的 await 期间收到 GameData 也不会误判成「没有动画在跑」而抢着回正位置
 				this.addPlayerMoveJob(walkPlayerId);
 				try {
 					await this.runPlayerMoveExclusive(walkPlayerId, async () => {
-						// 起点丢了就退回服务端位置：PlayerWalk 是在游戏进程提交新位置之前发的，
+						const mapIndexLength = toRaw(mapDataStore.mapIndex.length);
+						// 优先用广播里的绝对起点：每一段都能自己对齐，不再依赖前面所有段都收到过。
+						// 老版本的房主不发这两个字段，退回原来的相对累加逻辑：
+						// 起点丢了再退到服务端位置 —— PlayerWalk 是在游戏进程提交新位置之前发的，
 						// 此刻 GameData 里的 positionIndex 正好是这一段的起点。缺这层兜底会算出 NaN，
 						// 棋子会直接飞到坐标原点再也回不来。
 						const storedPosition = toRaw(this.playerPosition.get(walkPlayerId));
-						const sourcePosition = Number.isInteger(storedPosition)
-							? (storedPosition as number)
-							: (useGameData().getPlayerInfoById(walkPlayerId)?.positionIndex ?? 0);
-						const mapIndexLength = toRaw(mapDataStore.mapIndex.length);
-						const endIndex = (((sourcePosition + step) % mapIndexLength) + mapIndexLength) % mapIndexLength;
+						const sourcePosition = Number.isInteger(sourceIndex)
+							? (sourceIndex as number)
+							: Number.isInteger(storedPosition)
+								? (storedPosition as number)
+								: (useGameData().getPlayerInfoById(walkPlayerId)?.positionIndex ?? 0);
+						const endIndex = Number.isInteger(targetIndex)
+							? (targetIndex as number)
+							: (((sourcePosition + step) % mapIndexLength) + mapIndexLength) % mapIndexLength;
 
 						const playerEntity = this.playerEntities.get(walkPlayerId);
 						// 实体缺失（场景重载中、破产清理后）时只能放弃这段动画，
@@ -1269,6 +1283,19 @@ export class GameRenderer {
 							console.warn("[渲染器] 走路动画找不到玩家实体，跳过本段动画:", walkPlayerId);
 							if (this.isCurrentScene(generation)) this.commitPlayerPosition(walkPlayerId, endIndex);
 							return;
+						}
+
+						// 广播带了绝对起点、而本地记的位置对不上，说明前面漏过广播：
+						// 先把棋子挪回正确的起点再走，否则这一段会从错误的格子飘过去
+						if (Number.isInteger(sourceIndex) && storedPosition !== sourcePosition) {
+							const sourceMapItem = this.getMapItem(sourcePosition);
+							if (sourceMapItem) {
+								console.warn(
+									`[渲染器] 玩家 ${walkPlayerId} 的显示位置(${storedPosition})与服务端起点(${sourcePosition})不一致，先归位再走`,
+								);
+								this.placeModelOnMapItem(playerEntity.model, sourceMapItem);
+								this.commitPlayerPosition(walkPlayerId, sourcePosition);
+							}
 						}
 
 						this.currentFocusModule = playerEntity.model;
