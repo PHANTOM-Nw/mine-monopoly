@@ -16,6 +16,13 @@ export enum OperateType {
 	RollDice = "RollDice", //前端掷骰子
 	UseChanceCard = "UseChanceCard", //使用机会卡
 	Animation = "AnimationComplete", //前端动画完成回馈
+	/**
+	 * 「我这边没有渲染器，这段动画我放弃了」。
+	 * 不能当成 AnimationComplete 上报：动画等待是「谁先回谁算数」，
+	 * 一个还在加载的客户端秒回就会替全场结束等待，别人的棋子还在半路上，
+	 * 游戏进程却已经跑到下一步了。
+	 */
+	AnimationSkipped = "AnimationSkipped",
 
 	MapResourceLoaded = "MapResourceLoaded", //地图资源加载完毕
 	LoadingStarted = "LoadingStarted", //客机开始加载地图资源

@@ -435,6 +435,11 @@ async function handleMessage(data: WorkerCommMsg) {
 					const animationId = _data;
 					gameProcess?.markAnimationComplete(animationId);
 				}
+
+				// 没有渲染器的客户端只是「弃权」，不能算完成，只能把他从等待名单里划掉
+				if (operateType === OperateType.AnimationSkipped && _data && typeof _data === "string") {
+					gameProcess?.markAnimationSkipped(_data, userId);
+				}
 			}
 			break;
 		case WorkerCommType.UserOffLine:
@@ -603,6 +608,8 @@ export class GameProcess implements IGameProcess {
 
 	/** 动画完成处理器映射表（animationId -> cleanup函数） */
 	animationCompletionHandlers: Map<string, () => void> = new Map();
+	/** 这一段动画有哪些客户端报了「我没渲染器，弃权」（animationId -> userId 集合） */
+	private animationSkips: Map<string, Set<string>> = new Map();
 
 	/** 游戏结束时的玩家排名 */
 	private rankedPlayerIds: string[] = [];
@@ -3787,6 +3794,44 @@ export class GameProcess implements IGameProcess {
 	}
 
 	/**
+	 * 某个客户端报告「我这边没有渲染器，这段动画弃权」。
+	 *
+	 * 弃权不等于播完：动画等待是「谁先回谁算数」，要是把弃权当完成，一个还在加载的
+	 * 客户端（中途进场的旁观者、重连的玩家、正在重载场景的人）就能替全场结束等待，
+	 * 别人的棋子还在半路上而游戏进程已经跑到下一步了 —— 越积越多，视觉和实际彻底错开。
+	 * 所以这里只把他从等待名单里划掉，等真正在渲染的客户端回执；
+	 * 只有当所有该渲染的人都弃权了（比如全 AI 局里唯一的旁观者还在加载），才提前放行。
+	 */
+	public markAnimationSkipped(animationId: string, userId: string): void {
+		if (!this.animationCompletionHandlers.has(animationId)) return;
+
+		const skipped = this.animationSkips.get(animationId) ?? new Set<string>();
+		skipped.add(userId);
+		this.animationSkips.set(animationId, skipped);
+
+		const expected = this.getExpectedAnimationAckUserIds();
+		if (Array.from(expected).some((id) => !skipped.has(id))) return;
+
+		console.warn(`[GameProcess] 没有客户端在渲染这段动画，提前放行: ${animationId}`);
+		this.markAnimationComplete(animationId);
+	}
+
+	/**
+	 * 该给动画回执的客户端：还连着的真人玩家 + 开局就在场的旁观者。
+	 * AI 玩家没有客户端，掉线的人也不会回执，都不能算进来，否则永远凑不齐。
+	 * 中途进场的旁观者不在名单里 —— 他还在加载时的弃权不该影响别人。
+	 */
+	private getExpectedAnimationAckUserIds(): Set<string> {
+		const ids = new Set<string>();
+		for (const player of this.players.values()) {
+			if (player.isAI || player.isOffline || player.isBankrupted) continue;
+			ids.add(player.id);
+		}
+		for (const spectatorId of this.initSpectatorIds) ids.add(spectatorId);
+		return ids;
+	}
+
+	/**
 	 * 等待动画完成（带超时）
 	 * @param animationId - 动画ID
 	 * @param timeout - 超时时间（毫秒）
@@ -3802,6 +3847,7 @@ export class GameProcess implements IGameProcess {
 			const cleanup = () => {
 				clearTimeout(timer);
 				this.animationCompletionHandlers.delete(animationId);
+				this.animationSkips.delete(animationId);
 				resolve();
 			};
 

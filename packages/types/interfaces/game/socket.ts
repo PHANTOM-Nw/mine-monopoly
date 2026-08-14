@@ -1043,6 +1043,9 @@ export interface PlayerOperationResult {
 	/** 播放动画 */
 	[OperateType.Animation]: string;
 
+	/** 客户端没有渲染器，这段动画弃权（动画 ID） */
+	[OperateType.AnimationSkipped]: string;
+
 	/** 地图资源加载完成 */
 	[OperateType.MapResourceLoaded]: undefined;
 
