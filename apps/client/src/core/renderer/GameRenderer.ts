@@ -1229,6 +1229,12 @@ export class GameRenderer {
 			this.syncPlayerThinkingMarker(playerId, Boolean(newValue));
 		});
 
+		// 服务端下发的 positionIndex 是权威位置：走路广播漏掉一段（渲染器还没挂监听、
+		// 模型还没加载好、场景正在重载）棋子就会永久偏移，而且越走越偏。这里按 GameData 拽回来。
+		useEventBus().on("player-positionIndex", (playerId: string, _oldValue: number, newValue: number) => {
+			this.reconcilePlayerPosition(playerId, toRaw(newValue));
+		});
+
 		useEventBus().on(
 			"player-walk",
 			async (walkPlayerId: string, step: number, walkId: string, totalSteps?: number, startStep?: number) => {
