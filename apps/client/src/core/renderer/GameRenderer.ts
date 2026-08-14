@@ -128,6 +128,13 @@ export class GameRenderer {
 	private positionReconcileTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 	/** 位置回正的等待窗口：GameData 常常比对应的动画广播早到，留点时间让动画自己接管 */
 	private static readonly POSITION_RECONCILE_DELAY = 800;
+	/**
+	 * 场景版本号，每次 reloadScene 自增。
+	 * reloadScene 只是把 playerMoveLocks / playerEntities 清空，并不能取消已经在 await gsap
+	 * 的那段走路动画（切后台时 rAF 停摆、gsap 冻结，切回来才解冻）。旧任务恢复后算出来的落点
+	 * 是拿重载前的起点推的，认下来就会把 initPlayer 刚按 GameData 对齐好的位置又覆盖回去。
+	 */
+	private sceneGeneration: number = 0;
 	private requestAnimationFrameId: number = -1;
 
 	private playerWatchers: Map<
@@ -1238,6 +1245,7 @@ export class GameRenderer {
 		useEventBus().on(
 			"player-walk",
 			async (walkPlayerId: string, step: number, walkId: string, totalSteps?: number, startStep?: number) => {
+				const generation = this.sceneGeneration;
 				// 同步登记，之后的 await 期间收到 GameData 也不会误判成「没有动画在跑」而抢着回正位置
 				this.addPlayerMoveJob(walkPlayerId);
 				try {
@@ -1259,7 +1267,7 @@ export class GameRenderer {
 						// 后面每一段都会从错误的起点接着累加，棋子从此永久偏移。
 						if (!playerEntity) {
 							console.warn("[渲染器] 走路动画找不到玩家实体，跳过本段动画:", walkPlayerId);
-							this.commitPlayerPosition(walkPlayerId, endIndex);
+							if (this.isCurrentScene(generation)) this.commitPlayerPosition(walkPlayerId, endIndex);
 							return;
 						}
 
@@ -1282,14 +1290,22 @@ export class GameRenderer {
 								startStep ?? 1, // 向后兼容：如果没有提供 startStep，从第1步开始
 							);
 						} finally {
-							this.currentFocusModule = null;
-							this.isLockingRole = false;
+							// 只放开自己占着的那把镜头锁：场景重载后新动画可能已经在跟别的棋子了
+							if (this.currentFocusModule === playerEntity.model) {
+								this.currentFocusModule = null;
+								this.isLockingRole = false;
+							}
 
-							// 更新 playerPosition Map，确保下一段走路从正确位置开始
-							this.commitPlayerPosition(walkPlayerId, endIndex);
+							// 场景在这段动画期间重载过的话，这次的落点是拿重载前的旧起点推的，
+							// 认下来会把 initPlayer 刚对齐好的位置覆盖掉，breakUp 还会顺手
+							// 把「新模型」摆到那个旧格子上 —— 整段作废
+							if (this.isCurrentScene(generation)) {
+								// 更新 playerPosition Map，确保下一段走路从正确位置开始
+								this.commitPlayerPosition(walkPlayerId, endIndex);
 
-							// 拆散重叠的玩家模型
-							this.breakUpPlayersInSameMapItem();
+								// 拆散重叠的玩家模型
+								this.breakUpPlayersInSameMapItem();
+							}
 						}
 					});
 				} finally {
@@ -1305,11 +1321,12 @@ export class GameRenderer {
 			walkId: string,
 			viaMapItemIds?: string[],
 		) => {
+			const generation = this.sceneGeneration;
 			this.addPlayerMoveJob(tpPlayerId);
 			try {
 				// 传送和走路共用同一把锁，避免同一个棋子被两段动画同时拖着走
 				await this.runPlayerMoveExclusive(tpPlayerId, () =>
-					this.playPlayerTpAnimation(tpPlayerId, positionIndex, viaMapItemIds),
+					this.playPlayerTpAnimation(tpPlayerId, positionIndex, generation, viaMapItemIds),
 				);
 			} finally {
 				const monopolyClient = useMonopolyClient();
@@ -1743,12 +1760,17 @@ export class GameRenderer {
 	/**
 	 * 传送动画。实体缺失时直接跳过，位置由 GameData 回正兜底。
 	 */
-	private async playPlayerTpAnimation(tpPlayerId: string, positionIndex: number, viaMapItemIds?: string[]) {
+	private async playPlayerTpAnimation(
+		tpPlayerId: string,
+		positionIndex: number,
+		generation: number,
+		viaMapItemIds?: string[],
+	) {
 		const playerEntity = this.getPlayerEntity(tpPlayerId);
 		if (!playerEntity) {
 			// 动画放弃了，位置账还是要记：不记的话后续走路会从传送前的老格子接着累加
 			console.warn("[渲染器] 传送动画找不到玩家实体，跳过本次动画:", tpPlayerId);
-			this.commitPlayerPosition(tpPlayerId, positionIndex);
+			if (this.isCurrentScene(generation)) this.commitPlayerPosition(tpPlayerId, positionIndex);
 			return;
 		}
 
@@ -1816,17 +1838,26 @@ export class GameRenderer {
 				this.placeModelOnMapItem(model, mapItem);
 			}
 
-			this.commitPlayerPosition(tpPlayerId, positionIndex);
+			if (this.isCurrentScene(generation)) this.commitPlayerPosition(tpPlayerId, positionIndex);
 		} finally {
-			this.currentFocusModule = null;
-			this.isLockingRole = false;
-			this.breakUpPlayersInSameMapItem();
+			// 只放开自己占着的那把镜头锁：场景重载后新动画可能已经在跟别的棋子了
+			if (this.currentFocusModule === model) {
+				this.currentFocusModule = null;
+				this.isLockingRole = false;
+			}
+			// 场景重载过的话这次落点已经作废，别再把新模型摆到旧格子上
+			if (this.isCurrentScene(generation)) this.breakUpPlayersInSameMapItem();
 		}
 	}
 
 	private placeModelOnMapItem(model: THREE.Object3D, mapItem: THREE.Object3D) {
 		const { x, z } = mapItem.position;
 		model.position.set(x, this.getMapItemSurfaceHeight(mapItem), z);
+	}
+
+	/** 这段动画是不是还属于当前这一版场景 —— reloadScene 之后旧任务算出来的落点一律作废 */
+	private isCurrentScene(generation: number): boolean {
+		return generation === this.sceneGeneration;
 	}
 
 	/**
@@ -2135,7 +2166,9 @@ export class GameRenderer {
 	 * 用于窗口恢复焦点时完全重新渲染
 	 */
 	public async reloadScene() {
-		// 1. 取消所有动画
+		// 1. 取消所有动画。清 Map 拦不住已经在 await gsap 的那些任务，它们照样会跑完，
+		//    所以顺手换一版场景号，让旧任务醒来之后自己把结果丢掉
+		this.sceneGeneration++;
 		this.playerMoveLocks.clear();
 		this.playerMoveJobs.clear();
 		this.clearAllPositionReconcile();
