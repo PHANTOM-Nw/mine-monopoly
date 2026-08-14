@@ -73,7 +73,7 @@ import { GameRuntimeStack } from "@src/core/worker/class/GameRuntimeStack";
 import GameProcessTypes from "./editor-lib.d.ts?raw";
 import { generatePropertySchema } from "@src/utils/html";
 import mitt from "mitt";
-import { aiManager } from "./ai";
+import { aiManager, buildLocalFallbackSelection, hasUsableAISelection } from "./ai";
 import type { Emitter } from "mitt";
 import { SaveSnapshot, PlayerSnapshot, PropertySnapshot } from "@src/core/save/types";
 import { applyWorkerSandbox } from "./security";
@@ -2530,7 +2530,22 @@ export class GameProcess implements IGameProcess {
 				actionType: option.actionType,
 			})),
 		});
-		const selection = await this.runAIDecision(player, request);
+		let selection = await this.runAIDecision(player, request);
+		// LLM 没配置 / 请求失败 / 桥接超时 / 模型答非所问，到这里都是一个空选择，
+		// 再往下走就会落到 defaultValue（确认框是 confirm:false），托管就成了「啥也不干」。
+		// 这里按常识替它出手，至少地会买、卡会用。
+		if (!hasUsableAISelection(selection)) {
+			const fallback = buildLocalFallbackSelection(request);
+			if (fallback) {
+				console.warn(`${AI_LOG_PREFIX} remote gave nothing, falling back to local strategy`, {
+					decisionId: request.metadata?.decisionId,
+					playerId: player.id,
+					scene: request.scene,
+					fallback,
+				});
+				selection = { ...selection, ...fallback };
+			}
+		}
 		// 模型返回期间玩家可能已经收回控制权，这时候这次决策整个作废：
 		// 不落子、不记决策链、也不喂回 AI 记忆
 		if (input?.isCanceled?.()) {

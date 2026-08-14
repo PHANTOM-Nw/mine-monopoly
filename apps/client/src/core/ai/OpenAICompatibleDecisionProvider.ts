@@ -1210,13 +1210,37 @@ function sanitizeMemoryPatches(value: unknown): AIDecisionMemoryPatch[] | undefi
 	return normalized.length > 0 ? normalized.slice(0, 4) : undefined;
 }
 
+/**
+ * 把模型给的 optionId 对回真正的选项 ID。
+ * 模型经常不照抄 id，而是回 label（「买！」）、actionType（「confirm」）或者
+ * 去掉下划线的写法（「confirm」对 `__confirm__`）。这些都能对上，不该判成无效
+ * —— 判无效就等于「模型没答」，会一路掉到兜底策略上去。
+ */
+function resolveOptionId(raw: unknown, options: AIDecisionOption[]): string | undefined {
+	if (typeof raw !== "string") return undefined;
+	const value = raw.trim();
+	if (!value) return undefined;
+
+	const exact = options.find((option) => option.id === value);
+	if (exact) return exact.id;
+
+	const lowered = value.toLowerCase();
+	const loose = options.find(
+		(option) =>
+			option.id.toLowerCase() === lowered ||
+			option.id.replace(/^_+|_+$/g, "").toLowerCase() === lowered ||
+			option.label?.trim().toLowerCase() === lowered ||
+			option.actionType?.toLowerCase() === lowered,
+	);
+	return loose?.id;
+}
+
 function normalizeSelection(request: AIDecisionRequest, value: unknown): AIDecisionSelection {
 	const availableOptions = pickAvailableOptions(request.options);
-	const validIds = new Set(availableOptions.map((option) => option.id));
 	const payload = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-	const optionId = typeof payload.optionId === "string" && validIds.has(payload.optionId) ? payload.optionId : undefined;
+	const optionId = resolveOptionId(payload.optionId, availableOptions);
 	const optionIds = Array.isArray(payload.optionIds)
-		? payload.optionIds.filter((item): item is string => typeof item === "string" && validIds.has(item))
+		? (payload.optionIds.map((item) => resolveOptionId(item, availableOptions)).filter(Boolean) as string[])
 		: undefined;
 	const confidence = typeof payload.confidence === "number" ? payload.confidence : undefined;
 	const reason = typeof payload.reason === "string" ? payload.reason : undefined;
@@ -1250,13 +1274,10 @@ function normalizeSelection(request: AIDecisionRequest, value: unknown): AIDecis
 		};
 	}
 
-	return {
-		optionId: availableOptions[0]?.id,
-		confidence: 0.2,
-		reason: "fallback_first_option",
-		chatMessages,
-		memoryPatches,
-	};
+	// 这里不能瞎猜。以前是「答不上来就选第一项」，而确认框的第一项永远是
+	// 买 / 升级 / 确认那一栏（buildConfirmDecisionRequest 写死了 [__confirm__, __cancel__]），
+	// 于是模型每答歪一次就替玩家花一次钱。交回给调用方，由本地兜底策略按局面决定。
+	return { chatMessages, memoryPatches };
 }
 
 function requiresApiKey(config: AIRemoteLLMConfig): boolean {
